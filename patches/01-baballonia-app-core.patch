@@ -1,0 +1,3965 @@
+﻿diff --git a/src/Baballonia.CaptureBin.IO/CaptureFrame.cs b/src/Baballonia.CaptureBin.IO/CaptureFrame.cs
+index 39fd8ac..4891542 100644
+--- a/src/Baballonia.CaptureBin.IO/CaptureFrame.cs
++++ b/src/Baballonia.CaptureBin.IO/CaptureFrame.cs
+@@ -62,7 +62,7 @@ public sealed class Frame
+     {
+         if (LeftJpeg.Length == 0) return new Mat();
+         using var buf = Mat.FromPixelData(1, LeftJpeg.Length, MatType.CV_8UC1, LeftJpeg);
+-        var bgr = Cv2.ImDecode(buf, ImreadModes.Color);
++        using var bgr = Cv2.ImDecode(buf, ImreadModes.Color);
+         if (bgr.Empty()) return new Mat();
+         var gray = new Mat();
+         Cv2.CvtColor(bgr, gray, ColorConversionCodes.BGR2GRAY);
+@@ -76,7 +76,7 @@ public sealed class Frame
+     {
+         if (RightJpeg.Length == 0) return new Mat();
+         using var buf = Mat.FromPixelData(1, RightJpeg.Length, MatType.CV_8UC1, RightJpeg);
+-        var bgr = Cv2.ImDecode(buf, ImreadModes.Color);
++        using var bgr = Cv2.ImDecode(buf, ImreadModes.Color);
+         if (bgr.Empty()) return new Mat();
+         var gray = new Mat();
+         Cv2.CvtColor(bgr, gray, ColorConversionCodes.BGR2GRAY);
+diff --git a/src/Baballonia.Desktop/Program.cs b/src/Baballonia.Desktop/Program.cs
+index c187d65..d4da1cf 100644
+--- a/src/Baballonia.Desktop/Program.cs
++++ b/src/Baballonia.Desktop/Program.cs
+@@ -4,6 +4,7 @@ using Baballonia.Desktop.Calibration;
+ using Baballonia.Desktop.Captures;
+ using Microsoft.Extensions.DependencyInjection;
+ using System;
++using System.Diagnostics;
+ using System.Threading;
+ using Velopack;
+ using TrainerService = Baballonia.Desktop.Calibration.TrainerService;
+@@ -19,7 +20,10 @@ sealed class Program
+      * but a Mutex should do the job until we have reason to roll one ourselves. Sources:
+      * https://stackoverflow.com/questions/6486195/ensuring-only-one-application-instance
+      * https://github.com/AvaloniaUI/Avalonia/discussions/17854#discussioncomment-11700510 */
+-    private static readonly Mutex Mutex = new(false, "baballonia-unique-id");
++    private static readonly string MutexName = Environment.GetEnvironmentVariable("BABALLONIA_MUTEX_NAME") is { Length: > 0 } overrideName
++        ? overrideName
++        : "baballonia-unique-id";
++    private static readonly Mutex Mutex = new(false, MutexName);
+ 
+     // Initialization code. Don't use any Avalonia, third-party APIs or any
+     // SynchronizationContext-reliant code before AppMain is called: things aren't initialized
+@@ -33,6 +37,8 @@ sealed class Program
+             return 75; // Exit code for BSD's EX_TEMPFAIL, invite the user to try again later
+         }
+ 
++        TryElevateProcessPriority();
++
+         VelopackApp.Build().Run();
+ 
+         App.RegisterRequiredPlatformServices<
+@@ -67,4 +73,20 @@ sealed class Program
+             .UsePlatformDetect()
+             .WithInterFont()
+             .LogToTrace();
++
++    private static void TryElevateProcessPriority()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        try
++        {
++            using var currentProcess = Process.GetCurrentProcess();
++            currentProcess.PriorityClass = ProcessPriorityClass.Normal;
++        }
++        catch
++        {
++            // Best-effort only.
++        }
++    }
+ }
+diff --git a/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs b/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs
+index 24a34db..a2514b7 100644
+--- a/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs
++++ b/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs
+@@ -23,5 +23,8 @@ public class IpCameraCaptureFactory : ICaptureFactory
+         return Uri.TryCreate(address, UriKind.RelativeOrAbsolute, out _) && address.StartsWith("http://");
+     }
+ 
+-    public string GetProviderName() => "Wireless/IP Camera";
++    public string GetProviderName()
++    {
++        return nameof(IpCameraCapture);
++    }
+ }
+diff --git a/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs b/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs
+index 2be4f0a..eb5dcf3 100644
+--- a/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs
++++ b/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs
+@@ -17,5 +17,8 @@ public class LibV4L2CaptureFactory(ILoggerFactory loggerFactory) : ICaptureFacto
+         return address.StartsWith("/dev/video");
+     }
+ 
+-    public string GetProviderName() => "V4L2";
++    public string GetProviderName()
++    {
++        return "Video4Linux2";
++    }
+ }
+diff --git a/src/Baballonia.OpenCVCapture/OpenCvCapture.cs b/src/Baballonia.OpenCVCapture/OpenCvCapture.cs
+index 9d1f396..d9b7d93 100644
+--- a/src/Baballonia.OpenCVCapture/OpenCvCapture.cs
++++ b/src/Baballonia.OpenCVCapture/OpenCvCapture.cs
+@@ -1,5 +1,9 @@
+-﻿using Microsoft.Extensions.Logging;
++using Microsoft.Extensions.Logging;
+ using OpenCvSharp;
++using System;
++using System.Diagnostics;
++using System.Threading;
++using System.Threading.Tasks;
+ using Capture = Baballonia.SDK.Capture;
+ 
+ namespace Baballonia.OpenCVCapture;
+@@ -7,18 +11,38 @@ namespace Baballonia.OpenCVCapture;
+ /// <summary>
+ /// Wrapper class for OpenCV
+ /// </summary>
+-public sealed class OpenCvCapture(string source, ILogger<OpenCvCapture> logger) : Capture(source, logger)
++public sealed class OpenCvCapture : Capture
+ {
++    private const string MsmfPrefix = "msmf:";
++    private const string DshowPrefix = "dshow:";
++    private readonly object _latestFrameLock = new();
+     private VideoCapture? _videoCapture;
++    private Mat? _latestFrame;
+     private static readonly VideoCaptureAPIs PreferredBackend;
+-
++    private readonly VideoCaptureAPIs _selectedBackend;
++    private readonly string _normalizedSource;
+     private Task? _updateTask;
+-    private readonly CancellationTokenSource _updateTaskCts = new();
++    private CancellationTokenSource? _updateTaskCts;
++    private long _readSuccessCount;
++    private long _readFailureCount;
++    private long _acquireCount;
++    private long _acquireNullCount;
++    private long _lastReadLogTick;
++    private long _latestFrameSequence;
++    private long _latestFrameTimestampTick;
++    private readonly TimeSpan _targetFrameInterval;
++
++    public override long LatestFrameSequence => Interlocked.Read(ref _latestFrameSequence);
++    public override long LatestFrameTimestampTick => Interlocked.Read(ref _latestFrameTimestampTick);
++
++    public OpenCvCapture(string source, ILogger<OpenCvCapture> logger) : base(source, logger)
++    {
++        _selectedBackend = ResolveBackend(source, out _normalizedSource);
++        _targetFrameInterval = ResolveTargetFrameInterval(source);
++    }
+ 
+     static OpenCvCapture()
+     {
+-        // Choose the most appropriate backend based on the detected OS
+-        // This is needed to handle concurrent camera access
+         if (OperatingSystem.IsWindows())
+         {
+             PreferredBackend = VideoCaptureAPIs.DSHOW;
+@@ -33,79 +57,264 @@ public sealed class OpenCvCapture(string source, ILogger<OpenCvCapture> logger)
+         }
+         else
+         {
+-            // Fallback to ANY which lets OpenCV choose
+             PreferredBackend = VideoCaptureAPIs.ANY;
+         }
+     }
+ 
+     public override async Task<bool> StartCapture()
+     {
+-        using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
++        await StopCapture();
++
++        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
++        try
++        {
++            if (int.TryParse(_normalizedSource, out var index))
++                _videoCapture = await Task.Run(() => VideoCapture.FromCamera(index, _selectedBackend), cts.Token);
++            else
++                _videoCapture = await Task.Run(() => new VideoCapture(_normalizedSource, _selectedBackend), cts.Token);
++        }
++        catch (Exception e)
++        {
++            Logger.LogError(e, "OpenCV capture start failed for {Source}", _normalizedSource);
++            IsReady = false;
++            return false;
++        }
++
++        _videoCapture.ConvertRgb = true;
++        try
++        {
++            _videoCapture.Set(VideoCaptureProperties.BufferSize, 1);
++        }
++        catch
++        {
++        }
++        if (OperatingSystem.IsWindows())
+         {
+             try
+             {
+-                if (int.TryParse(Source, out var index))
+-                    _videoCapture = await Task.Run(() => VideoCapture.FromCamera(index, PreferredBackend), cts.Token);
+-                else
+-                    _videoCapture = await Task.Run(() => new VideoCapture(Source), cts.Token);
++                _videoCapture.Set(VideoCaptureProperties.Fps, 90);
+             }
+-            catch (Exception e)
++            catch
+             {
+-                logger.LogError("Error: {}", e);
+-                IsReady = false;
+-                return false;
+             }
+         }
+-
+-        // Handle edge case cameras like the Varjo Aero that send frames in YUV
+-        // This won't activate the IR illuminators, but it's a good idea to standardize inputs
+-        _videoCapture.ConvertRgb = true;
+         IsReady = _videoCapture.IsOpened();
+ 
+-        CancellationToken token = _updateTaskCts.Token;
+-        _updateTask = Task.Run(() => VideoCapture_UpdateLoop(_videoCapture, token));
++        _updateTaskCts?.Dispose();
++        _updateTaskCts = new CancellationTokenSource();
++        var token = _updateTaskCts.Token;
++        _updateTask = Task.Factory.StartNew(() => VideoCapture_UpdateLoop(_videoCapture, token), token,
++            TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+ 
++        LogReadState("start");
+         return IsReady;
+     }
+ 
++    public override Mat? AcquireRawMat()
++    {
++        return AcquireRawFrameSnapshot().Frame;
++    }
++
++    public override RawFrameSnapshot AcquireRawFrameSnapshot()
++    {
++        Interlocked.Increment(ref _acquireCount);
++        lock (_latestFrameLock)
++        {
++            if (_latestFrame == null || _latestFrame.Empty())
++            {
++                Interlocked.Increment(ref _acquireNullCount);
++                LogReadState("acquire-null");
++                return new RawFrameSnapshot(null, 0, 0, Source);
++            }
++
++            LogReadState("acquire");
++            return new RawFrameSnapshot(
++                _latestFrame.Clone(),
++                Interlocked.Read(ref _latestFrameSequence),
++                Interlocked.Read(ref _latestFrameTimestampTick),
++                Source);
++        }
++    }
++
+     private Task VideoCapture_UpdateLoop(VideoCapture capture, CancellationToken ct)
+     {
+-        var frame = new Mat();
++        TryElevateCaptureThreadPriority();
+         while (!ct.IsCancellationRequested)
+         {
++            var readStart = Stopwatch.GetTimestamp();
++            var frame = new Mat();
+             try
+             {
+                 IsReady = capture.Read(frame);
+-                // no need to push empty Mat
+-                if (IsReady)
+-                    SetRawMat(frame);
++                if (IsReady && !frame.Empty())
++                {
++                    Interlocked.Increment(ref _readSuccessCount);
++                    lock (_latestFrameLock)
++                    {
++                        _latestFrame?.Dispose();
++                        _latestFrame = frame.Clone();
++                        Interlocked.Increment(ref _latestFrameSequence);
++                        Interlocked.Exchange(ref _latestFrameTimestampTick, Stopwatch.GetTimestamp());
++                        SignalFrameReady();
++                    }
++                    frame.Dispose();
++                    LogReadState("read");
++                }
++                else
++                {
++                    Interlocked.Increment(ref _readFailureCount);
++                    frame.Dispose();
++                    LogReadState("read-fail");
++                }
+             }
+-            catch (Exception)
++            catch (Exception e) when (!ct.IsCancellationRequested)
+             {
+-                // ignored
++                Interlocked.Increment(ref _readFailureCount);
++                frame.Dispose();
++                IsReady = false;
++                Logger.LogError(e, "OpenCV read failed for {Source}", Source);
++                LogReadState("read-exception");
+             }
++
++            PaceLoop(readStart, ct);
+         }
+ 
+         return Task.CompletedTask;
+     }
+ 
++    private static void TryElevateCaptureThreadPriority()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        try
++        {
++            Thread.CurrentThread.Priority = ThreadPriority.Normal;
++        }
++        catch
++        {
++            // Best-effort only.
++        }
++    }
++
++    private void LogReadState(string stage)
++    {
++        var nowTick = Environment.TickCount64;
++        var lastTick = Interlocked.Read(ref _lastReadLogTick);
++        if (nowTick - lastTick < 2000)
++            return;
++
++        Interlocked.Exchange(ref _lastReadLogTick, nowTick);
++        Logger.LogInformation(
++            "OpenCvCapture {Stage}: source={Source} backend={Backend} success={Success} failure={Failure} acquire={Acquire} acquireNull={AcquireNull} ready={Ready}",
++            stage,
++            Source,
++            _selectedBackend,
++            Interlocked.Read(ref _readSuccessCount),
++            Interlocked.Read(ref _readFailureCount),
++            Interlocked.Read(ref _acquireCount),
++            Interlocked.Read(ref _acquireNullCount),
++            IsReady);
++    }
++
+     public override Task<bool> StopCapture()
+     {
+         if (_videoCapture is null)
++        {
++            IsReady = false;
++            LogReadState("stop");
+             return Task.FromResult(false);
++        }
+ 
+-        if (_updateTask != null) {
+-            _updateTaskCts.Cancel();
+-            _updateTask.Wait();
++        if (_updateTask != null)
++        {
++            _updateTaskCts?.Cancel();
++            try
++            {
++                _updateTask.Wait();
++            }
++            catch (AggregateException e) when (e.InnerExceptions.All(ex => ex is TaskCanceledException or OperationCanceledException))
++            {
++            }
++            _updateTask = null;
+         }
+ 
+-        IsReady = false;
+-        if (_videoCapture != null)
++        _updateTaskCts?.Dispose();
++        _updateTaskCts = null;
++
++        lock (_latestFrameLock)
+         {
+-            _videoCapture.Release();
+-            _videoCapture.Dispose();
+-            _videoCapture = null;
++            _latestFrame?.Dispose();
++            _latestFrame = null;
+         }
++
++        IsReady = false;
++        _videoCapture.Release();
++        _videoCapture.Dispose();
++        _videoCapture = null;
++        LogReadState("stop");
+         return Task.FromResult(true);
+     }
++
++    private void PaceLoop(long readStart, CancellationToken ct)
++    {
++        if (_targetFrameInterval <= TimeSpan.Zero)
++            return;
++
++        var deadline = readStart + (long)(_targetFrameInterval.TotalSeconds * Stopwatch.Frequency);
++        while (!ct.IsCancellationRequested)
++        {
++            var remainingTicks = deadline - Stopwatch.GetTimestamp();
++            if (remainingTicks <= 0)
++                return;
++
++            var remainingMs = remainingTicks * 1000.0 / Stopwatch.Frequency;
++            if (remainingMs > 2.0)
++            {
++                Thread.Sleep(1);
++                continue;
++            }
++
++            if (remainingMs > 0.5)
++            {
++                Thread.Yield();
++                continue;
++            }
++
++            Thread.SpinWait(64);
++        }
++    }
++
++    private static VideoCaptureAPIs ResolveBackend(string source, out string normalizedSource)
++    {
++        normalizedSource = source;
++        if (OperatingSystem.IsWindows())
++        {
++            if (source.StartsWith(MsmfPrefix, StringComparison.OrdinalIgnoreCase))
++            {
++                normalizedSource = source[MsmfPrefix.Length..];
++                return VideoCaptureAPIs.MSMF;
++            }
++
++            if (source.StartsWith(DshowPrefix, StringComparison.OrdinalIgnoreCase))
++            {
++                normalizedSource = source[DshowPrefix.Length..];
++                return VideoCaptureAPIs.DSHOW;
++            }
++        }
++
++        return PreferredBackend;
++    }
++
++    private static TimeSpan ResolveTargetFrameInterval(string source)
++    {
++        if (!OperatingSystem.IsWindows())
++            return TimeSpan.Zero;
++
++        if (source.StartsWith(MsmfPrefix, StringComparison.OrdinalIgnoreCase) ||
++            source.StartsWith(DshowPrefix, StringComparison.OrdinalIgnoreCase))
++            return TimeSpan.FromMilliseconds(1000.0 / 90.0);
++
++        return TimeSpan.Zero;
++    }
+ }
+diff --git a/src/Baballonia.SDK/Capture.cs b/src/Baballonia.SDK/Capture.cs
+index 5af1ce0..c458707 100644
+--- a/src/Baballonia.SDK/Capture.cs
++++ b/src/Baballonia.SDK/Capture.cs
+@@ -1,6 +1,9 @@
+ ﻿using Microsoft.Extensions.Logging;
+ using OpenCvSharp;
++using System;
++using System.Diagnostics;
+ using System.Text.RegularExpressions;
++using System.Threading;
+ 
+ namespace Baballonia.SDK;
+ 
+@@ -9,14 +12,19 @@ namespace Baballonia.SDK;
+ /// </summary>
+ public abstract class Capture(string source, ILogger logger) : IDisposable
+ {
++    public readonly record struct RawFrameSnapshot(Mat? Frame, long Sequence, long TimestampTick, string Source);
++
+     protected ILogger Logger = logger;
+     private Mat? _rawMat;
+-    private object _rawMatLock = new();
++    private readonly object _rawMatLock = new();
++    private readonly AutoResetEvent _frameReadyEvent = new(false);
+ 
+     /// <summary>
+     /// Where this Capture source is currently pulling data from
+     /// </summary>
+     public string Source { get; set; } = source;
++    public virtual long LatestFrameSequence => 0;
++    public virtual long LatestFrameTimestampTick => 0;
+ 
+     /// <summary>
+     /// Represents the incoming frame data for this capture source.
+@@ -24,7 +32,7 @@ public abstract class Capture(string source, ILogger logger) : IDisposable
+     /// Acquiring this value the caller takes ownership of the Mat object and sets the internal reference to null. <br/>
+     /// Thread safe
+     /// </summary>
+-    public Mat? AcquireRawMat()
++    public virtual Mat? AcquireRawMat()
+     {
+         Mat? result;
+         lock (_rawMatLock)
+@@ -35,6 +43,11 @@ public abstract class Capture(string source, ILogger logger) : IDisposable
+         return result;
+     }
+ 
++    public virtual RawFrameSnapshot AcquireRawFrameSnapshot()
++    {
++        return new RawFrameSnapshot(AcquireRawMat(), LatestFrameSequence, LatestFrameTimestampTick, Source);
++    }
++
+     /// <summary>
+     /// Sets current Mat object that can be acquired by someone else. <br/>
+     /// The caller gives up the responsibility for the object <br/>
+@@ -52,6 +65,40 @@ public abstract class Capture(string source, ILogger logger) : IDisposable
+             _rawMat = value;
+         }
+     }
++
++    protected void SignalFrameReady()
++    {
++        _frameReadyEvent.Set();
++    }
++
++    public virtual bool WaitForNewFrame(long lastSeenSequence, TimeSpan timeout, CancellationToken cancellationToken)
++    {
++        if (LatestFrameSequence > lastSeenSequence)
++            return true;
++
++        if (timeout <= TimeSpan.Zero)
++            return false;
++
++        var timeoutDeadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
++        var waitHandles = new[] { _frameReadyEvent, cancellationToken.WaitHandle };
++
++        while (true)
++        {
++            cancellationToken.ThrowIfCancellationRequested();
++
++            if (LatestFrameSequence > lastSeenSequence)
++                return true;
++
++            var remainingTicks = timeoutDeadline - Stopwatch.GetTimestamp();
++            if (remainingTicks <= 0)
++                return LatestFrameSequence > lastSeenSequence;
++
++            var remainingMs = (int)Math.Ceiling(remainingTicks * 1000.0 / Stopwatch.Frequency);
++            var waitResult = WaitHandle.WaitAny(waitHandles, Math.Max(1, remainingMs));
++            if (waitResult == WaitHandle.WaitTimeout)
++                return LatestFrameSequence > lastSeenSequence;
++        }
++    }
+     /// <summary>
+     /// Is this Capture source ready to produce data?
+     /// </summary>
+@@ -69,5 +116,14 @@ public abstract class Capture(string source, ILogger logger) : IDisposable
+     /// <returns></returns>
+     public abstract Task<bool> StopCapture();
+ 
+-    public virtual void Dispose(){}
++    public virtual void Dispose()
++    {
++        lock (_rawMatLock)
++        {
++            _rawMat?.Dispose();
++            _rawMat = null;
++        }
++
++        _frameReadyEvent.Dispose();
++    }
+ }
+diff --git a/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs b/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs
+index eb0c248..3256915 100644
+--- a/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs
++++ b/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs
+@@ -26,5 +26,8 @@ public class SerialCameraCaptureFactory : ICaptureFactory
+                lowered.StartsWith("/dev/ttyacm");
+     }
+ 
+-    public string GetProviderName() => "Serial Camera";
++    public string GetProviderName()
++    {
++        return nameof(SerialCameraCapture);
++    }
+ }
+diff --git a/src/Baballonia.VFTCapture/VFTCaptureFactory.cs b/src/Baballonia.VFTCapture/VFTCaptureFactory.cs
+index 6de80ba..ac928d5 100644
+--- a/src/Baballonia.VFTCapture/VFTCaptureFactory.cs
++++ b/src/Baballonia.VFTCapture/VFTCaptureFactory.cs
+@@ -20,16 +20,22 @@ public class VFTCaptureFactory(ILoggerFactory loggerFactory) : ICaptureFactory
+ 
+     public bool CanConnect(string address)
+     {
+-        // address will be either the device's friendly name, or its numerical index 0, 1, 2...
+-        var lowered = address.ToLower();
++        if (OperatingSystem.IsWindows())
++        {
++            return true;
++        }
+ 
+-        // Hack - prevent VFTCapture from opening Babble trackers
+-        if (lowered == "openiristracker") return false;
+-        else if (OperatingSystem.IsWindows()) return !lowered.StartsWith("com");
+-        else if (OperatingSystem.IsLinux()) return lowered.StartsWith("/dev/video");
++        if (OperatingSystem.IsLinux())
++        {
++            var lowered = address.ToLower();
++            return lowered.StartsWith("/dev/video");
++        }
+ 
+         return false;
+     }
+ 
+-    public string GetProviderName() => "Vive Facial Tracker";
++    public string GetProviderName()
++    {
++        return nameof(VFTCapture);
++    }
+ }
+diff --git a/src/Baballonia.VFTCapture/Windows/WindowsVFTCapture.cs b/src/Baballonia.VFTCapture/Windows/WindowsVFTCapture.cs
+index 8def408..e0c9158 100644
+--- a/src/Baballonia.VFTCapture/Windows/WindowsVFTCapture.cs
++++ b/src/Baballonia.VFTCapture/Windows/WindowsVFTCapture.cs
+@@ -54,8 +54,6 @@ public sealed class WindowsVftCapture(string source, ILogger logger) : Capture(s
+ 
+     private Task VideoCapture_UpdateLoop()
+     {
+-        Mat yuyvMat = new();
+-        Mat yuvConvert = new();
+         while (_loop)
+         {
+             try
+@@ -63,14 +61,13 @@ public sealed class WindowsVftCapture(string source, ILogger logger) : Capture(s
+                 IsReady = _videoCapture?.Read(_originalMat) == true;
+                 if (!IsReady) continue;
+ 
+-                yuyvMat = Mat.FromPixelData(400, 400, MatType.CV_8UC2, _originalMat.Data);
++                using var yuyvMat = Mat.FromPixelData(400, 400, MatType.CV_8UC2, _originalMat.Data);
++                using var grayscale = yuyvMat.CvtColor(ColorConversionCodes.YUV2GRAY_Y422, 0);
++                using var cropped = grayscale.ColRange(VFTCommon.ColumnRange).Clone();
++                using var resized = cropped.Resize(VFTCommon.ImageSize);
++                using var blurred = resized.GaussianBlur(VFTCommon.GaussianBlurSize, 0);
+ 
+-                yuvConvert = yuyvMat.CvtColor(ColorConversionCodes.YUV2GRAY_Y422, 0);
+-                yuvConvert = yuvConvert.ColRange(VFTCommon.ColumnRange);
+-                yuvConvert = yuvConvert.Resize(VFTCommon.ImageSize);
+-                yuvConvert = yuvConvert.GaussianBlur(VFTCommon.GaussianBlurSize, 0);
+-
+-                var rawMat = yuvConvert.LUT(VFTCommon.Lut);
++                var rawMat = blurred.LUT(VFTCommon.Lut);
+                 SetRawMat(rawMat);
+             }
+             // catch (TaskCanceledException)
+@@ -82,8 +79,6 @@ public sealed class WindowsVftCapture(string source, ILogger logger) : Capture(s
+                 // ignored
+             }
+         }
+-        yuyvMat.Dispose();
+-        yuvConvert.Dispose();
+ 
+         return Task.CompletedTask;
+     }
+diff --git a/src/Baballonia/Contracts/IVideoSource.cs b/src/Baballonia/Contracts/IVideoSource.cs
+index 1fbe8bb..c2f9eb8 100644
+--- a/src/Baballonia/Contracts/IVideoSource.cs
++++ b/src/Baballonia/Contracts/IVideoSource.cs
+@@ -6,6 +6,11 @@ namespace Baballonia.Services.Inference;
+ 
+ public interface IVideoSource : IDisposable
+ {
++    long FrameSequence { get; }
++    long LatestFrameTimestampTick { get; }
++    long LastDeliveredFrameSequence { get; }
++    long LastDeliveredFrameTimestampTick { get; }
++    string SourceDescription { get; }
+     bool Start();
+     bool Stop();
+     Mat? GetFrame(ColorType? color = null);
+diff --git a/src/Baballonia/Factories/SingleCameraSourceFactory.cs b/src/Baballonia/Factories/SingleCameraSourceFactory.cs
+index f1f95b5..34f6208 100644
+--- a/src/Baballonia/Factories/SingleCameraSourceFactory.cs
++++ b/src/Baballonia/Factories/SingleCameraSourceFactory.cs
+@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
+ using System;
+ using System.Diagnostics;
+ using System.Linq;
++using System.Threading;
+ using System.Threading.Tasks;
+ 
+ namespace Baballonia.Services.Inference;
+@@ -16,13 +17,18 @@ public class SingleCameraSourceFactory
+     private readonly ILoggerFactory _loggerFactory;
+     private readonly IDeviceEnumerator _deviceEnumerator;
+     private readonly IPlatformConnector _platformConnector;
++    private readonly ILocalSettingsService _localSettingsService;
++    private const string BigeyeBackendEnvVar = "BABALLONIA_BIGEYE_BACKEND";
++    private const string BigeyeProviderEnvVar = "BABALLONIA_BIGEYE_PROVIDER";
++    private const string BigeyeBackendSettingKey = "AppSettings_BigeyeWindowsBackend";
+ 
+-    public SingleCameraSourceFactory(ILogger<SingleCameraSourceFactory> logger, ILoggerFactory loggerFactory, IDeviceEnumerator deviceEnumerator, IPlatformConnector platformConnector)
++    public SingleCameraSourceFactory(ILogger<SingleCameraSourceFactory> logger, ILoggerFactory loggerFactory, IDeviceEnumerator deviceEnumerator, IPlatformConnector platformConnector, ILocalSettingsService localSettingsService)
+     {
+         _logger = logger;
+         _loggerFactory = loggerFactory;
+         _deviceEnumerator = deviceEnumerator;
+         _platformConnector = platformConnector;
++        _localSettingsService = localSettingsService;
+     }
+ 
+     public SingleCameraSource? Create(string address, string providerName)
+@@ -57,13 +63,36 @@ public class SingleCameraSourceFactory
+             camera = mappedAddress;
+         }
+ 
+-        var provider = _platformConnector.GetCaptureFactories().FirstOrDefault(factory => factory.CanConnect(camera));
++        var provider = ResolvePreferredProvider(address, camera) ??
++                       _platformConnector.GetCaptureFactories().FirstOrDefault(factory => factory.CanConnect(camera));
+         if (provider == null)
+             throw new ArgumentNullException($"No provider for {address} not found");
+ 
++        _logger.LogInformation("Using capture provider {ProviderName} for {CameraAddress}", provider.GetProviderName(), address);
+         return CreateStart(address, provider.GetProviderName());
+     }
+ 
++    private ICaptureFactory? ResolvePreferredProvider(string address, string mappedCamera)
++    {
++        if (!OperatingSystem.IsWindows() ||
++            !address.Contains("Bigeye", StringComparison.OrdinalIgnoreCase))
++            return null;
++
++        var forcedProvider = Environment.GetEnvironmentVariable(BigeyeProviderEnvVar)?.Trim();
++        if (string.IsNullOrWhiteSpace(forcedProvider))
++            return null;
++
++        var provider = _platformConnector.GetCaptureFactories()
++            .FirstOrDefault(factory =>
++                string.Equals(factory.GetProviderName(), forcedProvider, StringComparison.OrdinalIgnoreCase) &&
++                (factory.CanConnect(address) || factory.CanConnect(mappedCamera)));
++
++        if (provider != null)
++            _logger.LogInformation("Applying Bigeye provider override: {ProviderName}", provider.GetProviderName());
++
++        return provider;
++    }
++
+     public Task<SingleCameraSource?> CreateStart(string address, string providerName)
+     {
+         var camera = address;
+@@ -74,6 +103,20 @@ public class SingleCameraSourceFactory
+             camera = mappedAddress;
+         }
+ 
++        if (OperatingSystem.IsWindows() &&
++            providerName == "OpenCvCapture" &&
++            int.TryParse(camera, out _) &&
++            address.Contains("Bigeye", StringComparison.OrdinalIgnoreCase))
++        {
++            var selectedBackend = GetBigeyeBackendPreference();
++            camera = selectedBackend switch
++            {
++                "dshow" => $"dshow:{camera}",
++                _ => $"msmf:{camera}"
++            };
++            _logger.LogInformation("Applying Bigeye Windows capture hint: {HintedCamera}", camera);
++        }
++
+         return Task.Run<SingleCameraSource?>(() =>
+         {
+             var cameraSource = Create(camera, providerName);
+@@ -90,9 +133,11 @@ public class SingleCameraSourceFactory
+             var timeout = TimeSpan.FromSeconds(13);
+             while (sw.Elapsed < timeout)
+             {
+-                var testFrame = cameraSource.GetFrame();
++                using var testFrame = cameraSource.GetFrame();
+                 if (testFrame != null)
+                     return cameraSource;
++
++                Thread.Sleep(10);
+             }
+ 
+             _logger.LogError("No data was received from {}, with {}, closing... Maybe the camera is opened somewhere else?", address, providerName);
+@@ -100,4 +145,19 @@ public class SingleCameraSourceFactory
+             return null;
+         });
+     }
++
++    private string GetBigeyeBackendPreference()
++    {
++        var selectedBackend = Environment.GetEnvironmentVariable(BigeyeBackendEnvVar)?.Trim().ToLowerInvariant();
++        if (!string.IsNullOrWhiteSpace(selectedBackend))
++            return selectedBackend;
++
++        var savedMode = _localSettingsService.ReadSetting<string>(BigeyeBackendSettingKey, "Stable");
++        return savedMode?.Trim().ToLowerInvariant() switch
++        {
++            "low latency" => "dshow",
++            "dshow" => "dshow",
++            _ => "msmf"
++        };
++    }
+ }
+diff --git a/src/Baballonia/Services/EventBus.cs b/src/Baballonia/Services/EventBus.cs
+index af55872..ae2f870 100644
+--- a/src/Baballonia/Services/EventBus.cs
++++ b/src/Baballonia/Services/EventBus.cs
+@@ -11,6 +11,8 @@ public interface IEventBus
+     void Unsubscribe<T>(Action<T> callback);
+ 
+     void Publish<T>(T data);
++
++    bool HasSubscribers<T>();
+ }
+ 
+ public interface IFacePipelineEventBus : IEventBus
+@@ -63,13 +65,24 @@ public class GenericEventBus : IEventBus
+ 
+     public void Publish<T>(T data)
+     {
++        Delegate[] callbacks;
+         lock (_lock)
+         {
+-            if (_subscribers.TryGetValue(typeof(T), out var list))
+-            {
+-                foreach (var callback in list.Cast<Action<T>>())
+-                    callback(data);
+-            }
++            if (!_subscribers.TryGetValue(typeof(T), out var list) || list.Count == 0)
++                return;
++
++            callbacks = list.ToArray();
++        }
++
++        foreach (var callback in callbacks.Cast<Action<T>>())
++            callback(data);
++    }
++
++    public bool HasSubscribers<T>()
++    {
++        lock (_lock)
++        {
++            return _subscribers.TryGetValue(typeof(T), out var list) && list.Count > 0;
+         }
+     }
+ }
+diff --git a/src/Baballonia/Services/EyePipelineManager.cs b/src/Baballonia/Services/EyePipelineManager.cs
+index 8d3c9e3..2d99546 100644
+--- a/src/Baballonia/Services/EyePipelineManager.cs
++++ b/src/Baballonia/Services/EyePipelineManager.cs
+@@ -47,15 +47,19 @@ public class EyePipelineManager
+         dualTransformer.RightTransformer.TargetSize = new Size(128, 128);
+         _pipeline.ImageTransformer = dualTransformer;
+ 
+-        _ = LoadInferenceAsync();
+         LoadFilter();
+         LoadEyeStabilization();
++        LoadCorruptionDetector();
+     }
+ 
++    public bool HasLoadedInference => _pipeline.InferenceService != null;
++
+     public async Task LoadInferenceAsync()
+     {
+         var inf = await Task.Run(CreateInference);
++        var previousInference = _pipeline.InferenceService;
+         _pipeline.InferenceService = inf;
++        (previousInference as IDisposable)?.Dispose();
+     }
+ 
+     private DefaultInferenceRunner CreateInference()
+@@ -76,26 +80,22 @@ public class EyePipelineManager
+ 
+     public void LoadInference()
+     {
++        var previousInference = _pipeline.InferenceService;
+         _pipeline.InferenceService = CreateInference();
++        (previousInference as IDisposable)?.Dispose();
+     }
+ 
+     public void LoadFilter()
+     {
+-        var enabled = _localSettings.ReadSetting<bool>("AppSettings_OneEuroEnabled");
++        (_pipeline.Filter as IDisposable)?.Dispose();
++        _pipeline.Filter = null;
++
++        var mode = EyeSmoothingModes.Normalize(_localSettings.ReadSetting<string>("AppSettings_EyeSmoothingFilter", EyeSmoothingModes.SavitzkyGolayFir));
+         var cutoff = _localSettings.ReadSetting<float>("AppSettings_OneEuroMinFreqCutoff");
+         var speedCutoff = _localSettings.ReadSetting<float>("AppSettings_OneEuroSpeedCutoff");
+ 
+-        if (!enabled)
+-            return;
+-
+-        var eyeArray = new float[Utils.EyeRawExpressions];
+-        var eyeFilter = new OneEuroFilter(
+-            eyeArray,
+-            minCutoff: cutoff,
+-            beta: speedCutoff
+-        );
+-
+-        _pipeline.Filter = eyeFilter;
++        _pipeline.ActiveFilterMode = mode;
++        _pipeline.Filter = FilterFactory.Create(mode, Utils.EyeRawExpressions, cutoff, speedCutoff);
+     }
+ 
+     public void LoadEyeStabilization()
+@@ -104,6 +104,19 @@ public class EyePipelineManager
+         _pipeline.StabilizeEyes = stabilizeEyes;
+     }
+ 
++    public void LoadCorruptionDetector()
++    {
++        var selected = _localSettings.ReadSetting<string>("AppSettings_CorruptionDetector", CorruptionDetectorModes.StockRow);
++        var normalized = CorruptionDetectorModes.Normalize(selected);
++
++        if (_pipeline.CorruptionDetector.Mode == normalized)
++            return;
++
++        var previous = _pipeline.CorruptionDetector;
++        _pipeline.CorruptionDetector = FrameCorruptionDetectorFactory.Create(normalized);
++        (previous as IDisposable)?.Dispose();
++    }
++
+     public void SetLeftTransformation(CameraSettings cameraSettings)
+     {
+         if (_pipeline.ImageTransformer is DualImageTransformer dualImageTransformer)
+@@ -124,6 +137,9 @@ public class EyePipelineManager
+         if (string.IsNullOrEmpty(cameraAddress))
+             return false;
+ 
++        if (!HasLoadedInference)
++            await LoadInferenceAsync();
++
+         if (_pipeline.VideoSource == null)
+         {
+             SingleCameraSource cam;
+@@ -146,6 +162,10 @@ public class EyePipelineManager
+             if (cameraAddress == _currentRightAddress && _currentRightAddress != null)
+             {
+                 var tmp = dualCameraSource.RightCam;
++                if (!ReferenceEquals(dualCameraSource.LeftCam, tmp))
++                    dualCameraSource.LeftCam?.Dispose();
++                dualCameraSource.LeftCam = null;
++                dualCameraSource.RightCam = null;
+                 _pipeline.VideoSource = tmp;
+                 _currentLeftAddress = cameraAddress;
+                 return true;
+@@ -180,6 +200,7 @@ public class EyePipelineManager
+             var source = new DualCameraSource();
+             source.LeftCam = cam;
+             source.RightCam = tmp;
++            _pipeline.VideoSource = source;
+ 
+             _currentLeftAddress = cameraAddress;
+             return true;
+@@ -193,6 +214,9 @@ public class EyePipelineManager
+         if (string.IsNullOrEmpty(cameraAddress))
+             return false;
+ 
++        if (!HasLoadedInference)
++            await LoadInferenceAsync();
++
+         if (_pipeline.VideoSource == null)
+         {
+             SingleCameraSource cam;
+@@ -215,6 +239,10 @@ public class EyePipelineManager
+             if (cameraAddress == _currentLeftAddress && _currentLeftAddress != null)
+             {
+                 var tmp = dualCameraSource.LeftCam;
++                if (!ReferenceEquals(dualCameraSource.RightCam, tmp))
++                    dualCameraSource.RightCam?.Dispose();
++                dualCameraSource.LeftCam = null;
++                dualCameraSource.RightCam = null;
+                 _pipeline.VideoSource = tmp;
+                 _currentRightAddress = cameraAddress;
+                 return true;
+@@ -249,6 +277,7 @@ public class EyePipelineManager
+             var source = new DualCameraSource();
+             source.RightCam = cam;
+             source.LeftCam = tmp;
++            _pipeline.VideoSource = source;
+ 
+             _currentRightAddress = cameraAddress;
+             return true;
+@@ -330,4 +359,31 @@ public class EyePipelineManager
+     {
+         _pipeline.Filter = filter;
+     }
++
++    public async Task ReloadActiveCamerasAsync()
++    {
++        var leftAddress = _currentLeftAddress;
++        var rightAddress = _currentRightAddress;
++        if (string.IsNullOrWhiteSpace(leftAddress) && string.IsNullOrWhiteSpace(rightAddress))
++            return;
++
++        var leftPreferred = NormalizePreferredCapture(_localSettings.ReadSetting<string>("LastOpenedPreferredCaptureLeftCamera"));
++        var rightPreferred = NormalizePreferredCapture(_localSettings.ReadSetting<string>("LastOpenedPreferredCaptureRightCamera"));
++
++        StopAllCameras();
++
++        if (!string.IsNullOrWhiteSpace(leftAddress))
++            await StartLeftVideoSource(leftAddress, leftPreferred);
++
++        if (!string.IsNullOrWhiteSpace(rightAddress))
++            await StartRightVideoSource(rightAddress, rightPreferred);
++    }
++
++    private static string NormalizePreferredCapture(string? preferred)
++    {
++        if (string.IsNullOrWhiteSpace(preferred) || string.Equals(preferred, "Default", StringComparison.OrdinalIgnoreCase))
++            return string.Empty;
++
++        return preferred;
++    }
+ }
+diff --git a/src/Baballonia/Services/EyeTraceRecorderService.cs b/src/Baballonia/Services/EyeTraceRecorderService.cs
+new file mode 100644
+index 0000000..883c152
+--- /dev/null
++++ b/src/Baballonia/Services/EyeTraceRecorderService.cs
+@@ -0,0 +1,299 @@
++using Baballonia.Services.events;
++using Baballonia.Contracts;
++using Microsoft.Extensions.Hosting;
++using Microsoft.Extensions.Logging;
++using System;
++using System.Globalization;
++using System.Diagnostics;
++using System.Collections.Concurrent;
++using System.IO;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++
++namespace Baballonia.Services;
++
++public sealed class EyeTraceRecorderService : IHostedService, IDisposable
++{
++    private const string EnabledSettingKey = "AppSettings_RecordEyeTrace";
++    private const string TracesDirectoryName = "EyeTraceCapture";
++
++    private readonly IEyePipelineEventBus _eyePipelineEventBus;
++    private readonly ILocalSettingsService _localSettingsService;
++    private readonly ILogger<EyeTraceRecorderService> _logger;
++    private readonly object _lock = new();
++    private readonly JsonSerializerOptions _jsonOptions = new();
++    private readonly ConcurrentQueue<EyeTraceRow> _pendingRows = new();
++    private readonly SemaphoreSlim _pendingSignal = new(0);
++
++    private StreamWriter? _writer;
++    private string? _sessionDirectory;
++    private bool _recordingEnabled;
++    private long _nextSettingsRefreshTick;
++    private CancellationTokenSource? _writerCancellationTokenSource;
++    private Task? _writerTask;
++    private bool _disposed;
++
++    public EyeTraceRecorderService(
++        IEyePipelineEventBus eyePipelineEventBus,
++        ILocalSettingsService localSettingsService,
++        ILogger<EyeTraceRecorderService> logger)
++    {
++        _eyePipelineEventBus = eyePipelineEventBus;
++        _localSettingsService = localSettingsService;
++        _logger = logger;
++    }
++
++    public Task StartAsync(CancellationToken cancellationToken)
++    {
++        _eyePipelineEventBus.Subscribe<EyePipelineEvents.TraceResultEvent>(OnTraceResult);
++        _writerCancellationTokenSource = new CancellationTokenSource();
++        _writerTask = Task.Run(() => WriterLoopAsync(_writerCancellationTokenSource.Token), cancellationToken);
++        RefreshRecordingState(force: true);
++        return Task.CompletedTask;
++    }
++
++    public async Task StopAsync(CancellationToken cancellationToken)
++    {
++        _eyePipelineEventBus.Unsubscribe<EyePipelineEvents.TraceResultEvent>(OnTraceResult);
++        var writerCancellationTokenSource = Interlocked.Exchange(ref _writerCancellationTokenSource, null);
++        if (writerCancellationTokenSource != null)
++        {
++            try
++            {
++                writerCancellationTokenSource.Cancel();
++                _pendingSignal.Release();
++            }
++            catch (ObjectDisposedException)
++            {
++                // normal if Dispose won the shutdown race
++            }
++        }
++
++        if (_writerTask != null)
++        {
++            try
++            {
++                await _writerTask.WaitAsync(cancellationToken);
++            }
++            catch (OperationCanceledException)
++            {
++                // ignored
++            }
++        }
++
++        lock (_lock)
++        {
++            CloseActiveSession();
++        }
++
++        writerCancellationTokenSource?.Dispose();
++    }
++
++    private void OnTraceResult(EyePipelineEvents.TraceResultEvent trace)
++    {
++        RefreshRecordingState();
++        if (!_recordingEnabled)
++            return;
++
++        lock (_lock)
++        {
++            EnsureActiveSession(trace);
++            if (_sessionDirectory == null)
++                return;
++
++            _pendingRows.Enqueue(new EyeTraceRow(
++                DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
++                trace.frameSequence,
++                trace.frameCapturedTick,
++                trace.pipelineCompletedTick,
++                trace.sourceDescription,
++                trace.filterMode,
++                trace.rawResult,
++                trace.filteredResult,
++                trace.processedResult));
++        }
++
++        _pendingSignal.Release();
++    }
++
++    private void RefreshRecordingState(bool force = false)
++    {
++        var now = Environment.TickCount64;
++        if (!force && now < Interlocked.Read(ref _nextSettingsRefreshTick))
++            return;
++
++        Interlocked.Exchange(ref _nextSettingsRefreshTick, now + 500);
++        var enabled = _localSettingsService.ReadSetting<bool>(EnabledSettingKey, false);
++
++        lock (_lock)
++        {
++            if (enabled == _recordingEnabled)
++                return;
++
++            _recordingEnabled = enabled;
++            if (!_recordingEnabled)
++            {
++                CloseActiveSession();
++                return;
++            }
++
++            _logger.LogInformation("Eye trace recording enabled");
++        }
++    }
++
++    private void EnsureActiveSession(EyePipelineEvents.TraceResultEvent trace)
++    {
++        if (_writer != null)
++            return;
++
++        var tracesRoot = Path.Combine(Utils.UserAccessibleDataDirectory, TracesDirectoryName);
++        Directory.CreateDirectory(tracesRoot);
++
++        var sessionName = $"session-{DateTime.Now:yyyyMMdd-HHmmss}";
++        _sessionDirectory = Path.Combine(tracesRoot, sessionName);
++        Directory.CreateDirectory(_sessionDirectory);
++
++        var metadata = new EyeTraceMetadata(
++            CreatedAtUtc: DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
++            StopwatchFrequency: Stopwatch.Frequency,
++            FilterMode: trace.filterMode,
++            BigeyeBackend: ResolveActiveBackend(trace.sourceDescription),
++            VideoSource: trace.sourceDescription,
++            CorruptionDetector: _localSettingsService.ReadSetting<string>("AppSettings_CorruptionDetector", "Stock Row") ?? "Stock Row",
++            StabilizeEyes: _localSettingsService.ReadSetting<bool>("AppSettings_StabilizeEyes", true),
++            UseGpu: _localSettingsService.ReadSetting<bool>("AppSettings_UseGPU", true),
++            Notes: "Self-supervised N-Euro training trace. rawResult is pre-filter model output; filteredResult is post-filter pre-process; processedResult is the expression vector sent onward.");
++
++        File.WriteAllText(
++            Path.Combine(_sessionDirectory, "metadata.json"),
++            JsonSerializer.Serialize(metadata, _jsonOptions));
++
++        _writer = new StreamWriter(Path.Combine(_sessionDirectory, "samples.jsonl"), append: false);
++        _logger.LogInformation("Recording eye trace to {Path}", _sessionDirectory);
++    }
++
++    private void CloseActiveSession()
++    {
++        if (_writer == null)
++            return;
++
++        try
++        {
++            _writer.Flush();
++            _writer.Dispose();
++            _logger.LogInformation("Closed eye trace session {Path}", _sessionDirectory);
++        }
++        finally
++        {
++            _writer = null;
++            _sessionDirectory = null;
++        }
++    }
++
++    private async Task WriterLoopAsync(CancellationToken cancellationToken)
++    {
++        try
++        {
++            while (!cancellationToken.IsCancellationRequested)
++            {
++                await _pendingSignal.WaitAsync(cancellationToken);
++                FlushPendingRows();
++            }
++        }
++        catch (OperationCanceledException)
++        {
++            // normal shutdown
++        }
++        finally
++        {
++            FlushPendingRows();
++        }
++    }
++
++    private void FlushPendingRows()
++    {
++        lock (_lock)
++        {
++            if (_writer == null)
++            {
++                while (_pendingRows.TryDequeue(out _))
++                {
++                }
++
++                return;
++            }
++
++            while (_pendingRows.TryDequeue(out var row))
++            {
++                _writer.WriteLine(JsonSerializer.Serialize(row, _jsonOptions));
++            }
++
++            _writer.Flush();
++        }
++    }
++
++    public void Dispose()
++    {
++        if (_disposed)
++            return;
++
++        _disposed = true;
++        var writerCancellationTokenSource = Interlocked.Exchange(ref _writerCancellationTokenSource, null);
++        if (writerCancellationTokenSource != null)
++        {
++            try
++            {
++                writerCancellationTokenSource.Cancel();
++                _pendingSignal.Release();
++            }
++            catch (ObjectDisposedException)
++            {
++                // normal if StopAsync already disposed shutdown primitives
++            }
++            finally
++            {
++                writerCancellationTokenSource.Dispose();
++            }
++        }
++
++        _pendingSignal.Dispose();
++        lock (_lock)
++        {
++            CloseActiveSession();
++        }
++    }
++
++    private sealed record EyeTraceMetadata(
++        string CreatedAtUtc,
++        long StopwatchFrequency,
++        string FilterMode,
++        string BigeyeBackend,
++        string VideoSource,
++        string CorruptionDetector,
++        bool StabilizeEyes,
++        bool UseGpu,
++        string Notes);
++
++    private sealed record EyeTraceRow(
++        string Utc,
++        long FrameSequence,
++        long FrameCapturedTick,
++        long PipelineCompletedTick,
++        string SourceDescription,
++        string FilterMode,
++        float[] RawResult,
++        float[] FilteredResult,
++        float[] ProcessedResult);
++
++    private string ResolveActiveBackend(string sourceDescription)
++    {
++        if (sourceDescription.Contains("dshow:", StringComparison.OrdinalIgnoreCase))
++            return "Low Latency";
++
++        if (sourceDescription.Contains("msmf:", StringComparison.OrdinalIgnoreCase))
++            return "Stable";
++
++        return _localSettingsService.ReadSetting<string>("AppSettings_BigeyeWindowsBackend", "Stable") ?? "Stable";
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs b/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs
+index dcfc93a..ad94ee3 100644
+--- a/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs
++++ b/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs
+@@ -15,6 +15,8 @@ public class DefaultProcessingPipeline : IProcessingPipeline
+     public IInferenceRunner? InferenceService;
+     public IFilter? Filter;
+ 
++
++
+     public float[]? RunUpdate()
+     {
+         var frame = VideoSource?.GetFrame(ColorType.Gray8);
+diff --git a/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs b/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
+index 87706f4..cbc0b2d 100644
+--- a/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
++++ b/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
+@@ -1,60 +1,272 @@
+ ﻿using Baballonia.Services.events;
+ using Baballonia.Services.Inference.Enums;
++using Microsoft.Extensions.Logging;
++using OpenCvSharp;
+ using System;
++using System.Diagnostics;
++using System.Threading;
+ 
+ namespace Baballonia.Services.Inference;
+ 
+-public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : DefaultProcessingPipeline, IDisposable
++public class EyeProcessingPipeline : DefaultProcessingPipeline, IDisposable
+ {
+-    private readonly FastCorruptionDetector.FastCorruptionDetector _fastCorruptionDetector = new();
++    private const int LeftLidIndex = 2;
++    private const int RightLidIndex = 5;
++    private readonly ILogger<EyeProcessingPipeline> _logger;
++    private readonly IEyePipelineEventBus _eyePipelineEventBus;
+     private readonly ImageCollector _imageCollector = new();
++    private long _runCount;
++    private long _nullFrameCount;
++    private long _corruptFrameCount;
++    private long _transformedFrameCount;
++    private long _collectedFrameCount;
++    private long _resultCount;
++    private long _lastLogTick;
++    private long _captureStageTicks;
++    private long _captureStageSamples;
++    private long _captureStageMaxTicks;
++    private long _corruptionStageTicks;
++    private long _corruptionStageSamples;
++    private long _corruptionStageMaxTicks;
++    private long _rawPreviewStageTicks;
++    private long _rawPreviewStageSamples;
++    private long _rawPreviewStageMaxTicks;
++    private long _transformStageTicks;
++    private long _transformStageSamples;
++    private long _transformStageMaxTicks;
++    private long _transformedPreviewStageTicks;
++    private long _transformedPreviewStageSamples;
++    private long _transformedPreviewStageMaxTicks;
++    private long _collectStageTicks;
++    private long _collectStageSamples;
++    private long _collectStageMaxTicks;
++    private long _convertStageTicks;
++    private long _convertStageSamples;
++    private long _convertStageMaxTicks;
++    private long _inferenceStageTicks;
++    private long _inferenceStageSamples;
++    private long _inferenceStageMaxTicks;
++    private long _postProcessStageTicks;
++    private long _postProcessStageSamples;
++    private long _postProcessStageMaxTicks;
++    private long _totalStageTicks;
++    private long _totalStageSamples;
++    private long _totalStageMaxTicks;
++
++    public EyeProcessingPipeline(ILogger<EyeProcessingPipeline> logger, IEyePipelineEventBus eyePipelineEventBus)
++    {
++        _logger = logger;
++        _eyePipelineEventBus = eyePipelineEventBus;
++    }
+ 
+     public bool StabilizeEyes { get; set; } = true;
++    public IFrameCorruptionDetector CorruptionDetector { get; set; } = FrameCorruptionDetectorFactory.Create(CorruptionDetectorModes.StockRow);
++    public string ActiveFilterMode { get; set; } = Filters.EyeSmoothingModes.SavitzkyGolayFir;
+ 
+     public float[]? RunUpdate()
+     {
+-        var frame = VideoSource?.GetFrame(ColorType.Gray8);
+-        if(frame == null)
+-            return null;
+-
+-        if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
+-            return null;
+-
+-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
++        Interlocked.Increment(ref _runCount);
++        var runStartTick = Stopwatch.GetTimestamp();
++        Mat? frame = null;
++        Mat? transformed = null;
++        Mat? collected = null;
+ 
+-        var transformed = ImageTransformer?.Apply(frame);
+-        if(transformed == null)
+-            return null;
++        try
++        {
++            var stageStartTick = Stopwatch.GetTimestamp();
++            frame = VideoSource?.GetFrame(ColorType.Gray8);
++            RecordStageTiming(ref _captureStageTicks, ref _captureStageSamples, ref _captureStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++            if (frame == null)
++            {
++                Interlocked.Increment(ref _nullFrameCount);
++                LogState("frame-null");
++                return null;
++            }
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            var corruptionResult = CorruptionDetector.IsCorrupted(frame);
++            RecordStageTiming(ref _corruptionStageTicks, ref _corruptionStageSamples, ref _corruptionStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++            if (corruptionResult.isCorrupted)
++            {
++                Interlocked.Increment(ref _corruptFrameCount);
++                LogState("corrupt", frame);
++                return null;
++            }
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            _eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
++            RecordStageTiming(ref _rawPreviewStageTicks, ref _rawPreviewStageSamples, ref _rawPreviewStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            transformed = ImageTransformer?.Apply(frame);
++            RecordStageTiming(ref _transformStageTicks, ref _transformStageSamples, ref _transformStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++            if (transformed == null)
++                return null;
++            Interlocked.Increment(ref _transformedFrameCount);
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            _eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
++            RecordStageTiming(ref _transformedPreviewStageTicks, ref _transformedPreviewStageSamples, ref _transformedPreviewStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            collected = _imageCollector.Apply(transformed);
++            RecordStageTiming(ref _collectStageTicks, ref _collectStageSamples, ref _collectStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++            if (collected == null)
++                return null;
++            Interlocked.Increment(ref _collectedFrameCount);
++
++            if (InferenceService == null)
++                return null;
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
++            RecordStageTiming(ref _convertStageTicks, ref _convertStageSamples, ref _convertStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            var inferenceResult = InferenceService.Run();
++            RecordStageTiming(ref _inferenceStageTicks, ref _inferenceStageSamples, ref _inferenceStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++            if (inferenceResult == null)
++                return null;
++
++            var traceSubscribersActive = _eyePipelineEventBus.HasSubscribers<EyePipelineEvents.TraceResultEvent>();
++            float[]? rawInferenceResult = null;
++            if (traceSubscribersActive)
++                rawInferenceResult = (float[])inferenceResult.Clone();
++
++            stageStartTick = Stopwatch.GetTimestamp();
++            if (Filter != null)
++            {
++                inferenceResult = Filter.Filter(inferenceResult);
++                if (rawInferenceResult != null)
++                    RestoreRawLids(rawInferenceResult, inferenceResult);
++            }
++
++            float[]? filteredInferenceResult = null;
++            if (traceSubscribersActive)
++                filteredInferenceResult = (float[])inferenceResult.Clone();
++            ProcessExpressions(ref inferenceResult);
++            float[]? processedResult = null;
++            if (traceSubscribersActive)
++                processedResult = (float[])inferenceResult.Clone();
++
++            _eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
++            if (traceSubscribersActive && rawInferenceResult != null && filteredInferenceResult != null && processedResult != null)
++            {
++                _eyePipelineEventBus.Publish(
++                    new EyePipelineEvents.TraceResultEvent(
++                        rawInferenceResult,
++                        filteredInferenceResult,
++                        processedResult,
++                        VideoSource?.LastDeliveredFrameSequence ?? 0,
++                        VideoSource?.LastDeliveredFrameTimestampTick ?? 0,
++                        Stopwatch.GetTimestamp(),
++                        VideoSource?.SourceDescription ?? "unknown",
++                        ActiveFilterMode));
++            }
++            RecordStageTiming(ref _postProcessStageTicks, ref _postProcessStageSamples, ref _postProcessStageMaxTicks, Stopwatch.GetTimestamp() - stageStartTick);
++            Interlocked.Increment(ref _resultCount);
++            LogState("result", transformed);
++
++            return inferenceResult;
++        }
++        finally
++        {
++            collected?.Dispose();
++            transformed?.Dispose();
++            frame?.Dispose();
++            RecordStageTiming(ref _totalStageTicks, ref _totalStageSamples, ref _totalStageMaxTicks, Stopwatch.GetTimestamp() - runStartTick);
++        }
++    }
+ 
+-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
++    private void LogState(string stage, Mat? frame = null)
++    {
++        var nowTick = Environment.TickCount64;
++        var lastTick = Interlocked.Read(ref _lastLogTick);
++        if (nowTick - lastTick < 2000)
++            return;
++
++        Interlocked.Exchange(ref _lastLogTick, nowTick);
++        var captureSamples = Interlocked.Read(ref _captureStageSamples);
++        var corruptionSamples = Interlocked.Read(ref _corruptionStageSamples);
++        var inferenceSamples = Interlocked.Read(ref _inferenceStageSamples);
++        var totalSamples = Interlocked.Read(ref _totalStageSamples);
++        _logger.LogInformation(
++            "EyePipeline {Stage}: runs={Runs} nullFrames={NullFrames} corrupt={Corrupt} transformed={Transformed} collected={Collected} results={Results} videoSource={VideoSource} inference={HasInference} detector={Detector} frame={Width}x{Height}x{Channels} stageMeanMs capture={CaptureMeanMs:F3} corruption={CorruptionMeanMs:F3} rawPreview={RawPreviewMeanMs:F3} transform={TransformMeanMs:F3} transformedPreview={TransformedPreviewMeanMs:F3} collect={CollectMeanMs:F3} convert={ConvertMeanMs:F3} inference={InferenceMeanMs:F3} post={PostMeanMs:F3} total={TotalMeanMs:F3} stageMaxMs corruption={CorruptionMaxMs:F3} inference={InferenceMaxMs:F3} total={TotalMaxMs:F3} stageSamples capture={CaptureSamples} corruption={CorruptionSamples} inference={InferenceSamples} total={TotalSamples}",
++            stage,
++            Interlocked.Read(ref _runCount),
++            Interlocked.Read(ref _nullFrameCount),
++            Interlocked.Read(ref _corruptFrameCount),
++            Interlocked.Read(ref _transformedFrameCount),
++            Interlocked.Read(ref _collectedFrameCount),
++            Interlocked.Read(ref _resultCount),
++            VideoSource?.GetType().Name ?? "null",
++            InferenceService != null,
++            CorruptionDetector.Mode,
++            frame?.Width ?? 0,
++            frame?.Height ?? 0,
++            frame?.Channels() ?? 0,
++            TakeStageMeanMs(ref _captureStageTicks, ref _captureStageSamples),
++            TakeStageMeanMs(ref _corruptionStageTicks, ref _corruptionStageSamples),
++            TakeStageMeanMs(ref _rawPreviewStageTicks, ref _rawPreviewStageSamples),
++            TakeStageMeanMs(ref _transformStageTicks, ref _transformStageSamples),
++            TakeStageMeanMs(ref _transformedPreviewStageTicks, ref _transformedPreviewStageSamples),
++            TakeStageMeanMs(ref _collectStageTicks, ref _collectStageSamples),
++            TakeStageMeanMs(ref _convertStageTicks, ref _convertStageSamples),
++            TakeStageMeanMs(ref _inferenceStageTicks, ref _inferenceStageSamples),
++            TakeStageMeanMs(ref _postProcessStageTicks, ref _postProcessStageSamples),
++            TakeStageMeanMs(ref _totalStageTicks, ref _totalStageSamples),
++            TakeStageMaxMs(ref _corruptionStageMaxTicks),
++            TakeStageMaxMs(ref _inferenceStageMaxTicks),
++            TakeStageMaxMs(ref _totalStageMaxTicks),
++            captureSamples,
++            corruptionSamples,
++            inferenceSamples,
++            totalSamples);
++    }
+ 
+-        var collected = _imageCollector.Apply(transformed);
+-        transformed.Dispose();
+-        if (collected == null)
+-            return null;
++    private static void RecordStageTiming(ref long totalTicksField, ref long sampleCountField, ref long maxTicksField, long elapsedTicks)
++    {
++        Interlocked.Add(ref totalTicksField, elapsedTicks);
++        Interlocked.Increment(ref sampleCountField);
+ 
+-        if (InferenceService == null)
+-            return null;
++        while (true)
++        {
++            var currentMax = Volatile.Read(ref maxTicksField);
++            if (elapsedTicks <= currentMax)
++                return;
+ 
+-        ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
++            if (Interlocked.CompareExchange(ref maxTicksField, elapsedTicks, currentMax) == currentMax)
++                return;
++        }
++    }
+ 
+-        var inferenceResult = InferenceService?.Run();
+-        if(inferenceResult == null)
+-            return null;
++    private static double TakeStageMeanMs(ref long totalTicksField, ref long sampleCountField)
++    {
++        var ticks = Interlocked.Exchange(ref totalTicksField, 0);
++        var samples = Interlocked.Exchange(ref sampleCountField, 0);
++        if (samples <= 0)
++            return 0;
+ 
+-        if (Filter != null)
+-        {
+-            inferenceResult = Filter.Filter(inferenceResult);
+-        }
++        return TicksToMilliseconds(ticks / (double)samples);
++    }
+ 
+-        ProcessExpressions(ref inferenceResult);
++    private static double TakeStageMaxMs(ref long maxTicksField)
++    {
++        return TicksToMilliseconds(Interlocked.Exchange(ref maxTicksField, 0));
++    }
+ 
+-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
++    private static double TicksToMilliseconds(double ticks)
++    {
++        return ticks * 1000.0 / Stopwatch.Frequency;
++    }
+ 
+-        frame.Dispose();
+-        transformed.Dispose();
++    private static void RestoreRawLids(float[] rawInferenceResult, float[] filteredInferenceResult)
++    {
++        if (rawInferenceResult.Length <= RightLidIndex || filteredInferenceResult.Length <= RightLidIndex)
++            return;
+ 
+-        return inferenceResult;
++        filteredInferenceResult[LeftLidIndex] = rawInferenceResult[LeftLidIndex];
++        filteredInferenceResult[RightLidIndex] = rawInferenceResult[RightLidIndex];
+     }
+ 
+     private bool ProcessExpressions(ref float[] arKitExpressions)
+@@ -90,16 +302,12 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
+         }
+ 
+         // [left pitch, left yaw, left lid...
+-        float[] convertedExpressions = new float[Utils.EyeRawExpressions];
+-
+-        convertedExpressions[0] = rightEyeYawCorrected; // left pitch
+-        convertedExpressions[1] = eyeY;                   // left yaw
+-        convertedExpressions[2] = rightLid;               // left lid
+-        convertedExpressions[3] = leftEyeYawCorrected;  // right pitch
+-        convertedExpressions[4] = eyeY;                   // right yaw
+-        convertedExpressions[5] = leftLid;                // right lid
+-
+-        arKitExpressions = convertedExpressions;
++        arKitExpressions[0] = rightEyeYawCorrected; // left pitch
++        arKitExpressions[1] = eyeY;                 // left yaw
++        arKitExpressions[2] = rightLid;             // left lid
++        arKitExpressions[3] = leftEyeYawCorrected;  // right pitch
++        arKitExpressions[4] = eyeY;                 // right yaw
++        arKitExpressions[5] = leftLid;              // right lid
+ 
+         return true;
+     }
+@@ -112,7 +320,7 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
+         TryDisposeObject(ImageConverter);
+         TryDisposeObject(InferenceService);
+         TryDisposeObject(Filter);
+-        TryDisposeObject(_fastCorruptionDetector);
++        TryDisposeObject(CorruptionDetector);
+         TryDisposeObject(_imageCollector);
+     }
+ 
+diff --git a/src/Baballonia/Services/Inference/FacePipelineManager.cs b/src/Baballonia/Services/Inference/FacePipelineManager.cs
+index 2064c8d..4f909c5 100644
+--- a/src/Baballonia/Services/Inference/FacePipelineManager.cs
++++ b/src/Baballonia/Services/Inference/FacePipelineManager.cs
+@@ -39,19 +39,24 @@ public class FacePipelineManager
+         _pipeline.ImageConverter = new MatToFloatTensorConverter();
+         _pipeline.ImageTransformer = new ImageTransformer();
+ 
+-        _ = LoadInferenceAsync();
+         LoadFilter();
+     }
+ 
++    public bool HasLoadedInference => _pipeline.InferenceService != null;
++
+     public async Task LoadInferenceAsync()
+     {
+         var inf = await Task.Run(CreateInference);
++        var previousInference = _pipeline.InferenceService;
+         _pipeline.InferenceService = inf;
++        (previousInference as IDisposable)?.Dispose();
+     }
+ 
+     public void LoadInference()
+     {
++        var previousInference = _pipeline.InferenceService;
+         _pipeline.InferenceService = CreateInference();
++        (previousInference as IDisposable)?.Dispose();
+     }
+ 
+     public DefaultInferenceRunner CreateInference()
+@@ -62,21 +67,14 @@ public class FacePipelineManager
+ 
+     public void LoadFilter()
+     {
+-        var enabled = _localSettings.ReadSetting<bool>("AppSettings_OneEuroEnabled");
++        (_pipeline.Filter as IDisposable)?.Dispose();
++        _pipeline.Filter = null;
++
++        var mode = EyeSmoothingModes.Normalize(_localSettings.ReadSetting<string>("AppSettings_EyeSmoothingFilter", EyeSmoothingModes.SavitzkyGolayFir));
+         var cutoff = _localSettings.ReadSetting<float>("AppSettings_OneEuroMinFreqCutoff");
+         var speedCutoff = _localSettings.ReadSetting<float>("AppSettings_OneEuroSpeedCutoff");
+ 
+-        if (!enabled)
+-            return;
+-
+-        var faceArray = new float[Utils.FaceRawExpressions];
+-        var faceFilter = new OneEuroFilter(
+-            faceArray,
+-            minCutoff: cutoff,
+-            beta: speedCutoff
+-        );
+-
+-        _pipeline.Filter = faceFilter;
++        _pipeline.Filter = FilterFactory.Create(mode, Utils.FaceRawExpressions, cutoff, speedCutoff);
+     }
+ 
+     public void StopCamera()
+@@ -103,6 +101,9 @@ public class FacePipelineManager
+         if (string.IsNullOrEmpty(cameraAddress))
+             return false;
+ 
++        if (_pipeline.InferenceService == null)
++            await LoadInferenceAsync();
++
+         if (_pipeline.VideoSource != null)
+         {
+             _pipeline.VideoSource.Dispose();
+diff --git a/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs b/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs
+index 4573dbe..c5a7f05 100644
+--- a/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs
++++ b/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs
+@@ -1,43 +1,62 @@
+ ﻿using Baballonia.Services.events;
+ using Baballonia.Services.Inference.Enums;
++using OpenCvSharp;
+ using System;
+ 
+ namespace Baballonia.Services.Inference;
+ 
+-public class FaceProcessingPipeline(IFacePipelineEventBus facePipelineEventBus) : DefaultProcessingPipeline
++public class FaceProcessingPipeline : DefaultProcessingPipeline
+ {
++
++    private readonly IFacePipelineEventBus _facePipelineEventBus;
++
++    public FaceProcessingPipeline(IFacePipelineEventBus facePipelineEventBus)
++    {
++        _facePipelineEventBus = facePipelineEventBus;
++    }
++
++
+     public float[]? RunUpdate()
+     {
+-        var frame = VideoSource?.GetFrame(ColorType.Gray8);
+-        if(frame == null)
+-            return null;
++        Mat? frame = null;
++        Mat? transformed = null;
+ 
+-        facePipelineEventBus.Publish(new FacePipelineEvents.NewFrameEvent(frame));
++        try
++        {
++            frame = VideoSource?.GetFrame(ColorType.Gray8);
++            if (frame == null)
++                return null;
+ 
+-        var transformed = ImageTransformer?.Apply(frame);
++            _facePipelineEventBus.Publish(new FacePipelineEvents.NewFrameEvent(frame));
+ 
+-        if(transformed == null)
+-            return null;
++            transformed = ImageTransformer?.Apply(frame);
+ 
+-        facePipelineEventBus.Publish(new FacePipelineEvents.NewTransformedFrameEvent(transformed));
++            if (transformed == null)
++                return null;
+ 
+-        if (InferenceService == null)
+-            return null;
++            _facePipelineEventBus.Publish(new FacePipelineEvents.NewTransformedFrameEvent(transformed));
+ 
+-        ImageConverter?.Convert(transformed, InferenceService.GetInputTensor());
+-        transformed.Dispose();
++            if (InferenceService == null)
++                return null;
+ 
+-        var inferenceResult = InferenceService?.Run();
+-        if(inferenceResult == null)
+-            return null;
++            ImageConverter?.Convert(transformed, InferenceService.GetInputTensor());
+ 
+-        if(Filter != null)
+-            inferenceResult = Filter.Filter(inferenceResult);
++            var inferenceResult = InferenceService.Run();
++            if (inferenceResult == null)
++                return null;
+ 
+-        facePipelineEventBus.Publish(new FacePipelineEvents.NewFilteredResultEvent(inferenceResult));
++            if (Filter != null)
++                inferenceResult = Filter.Filter(inferenceResult);
+ 
++            _facePipelineEventBus.Publish(new FacePipelineEvents.NewFilteredResultEvent(inferenceResult));
+ 
+-        return inferenceResult;
++            return inferenceResult;
++        }
++        finally
++        {
++            transformed?.Dispose();
++            frame?.Dispose();
++        }
+     }
+ 
+     public void Dispose()
+diff --git a/src/Baballonia/Services/Inference/FrameCorruptionDetectors.cs b/src/Baballonia/Services/Inference/FrameCorruptionDetectors.cs
+new file mode 100644
+index 0000000..a48be19
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/FrameCorruptionDetectors.cs
+@@ -0,0 +1,462 @@
++using OpenCvSharp;
++using System;
++using System.Collections.Generic;
++using System.Linq;
++
++namespace Baballonia.Services.Inference;
++
++public interface IFrameCorruptionDetector : IDisposable
++{
++    string Mode { get; }
++    (bool isCorrupted, double score, double threshold) IsCorrupted(Mat frame);
++}
++
++public static class FrameCorruptionDetectorFactory
++{
++    public static IFrameCorruptionDetector Create(string? mode)
++    {
++        return CorruptionDetectorModes.Normalize(mode) switch
++        {
++            var value when value == CorruptionDetectorModes.HistogramFlash => new SplitFrameCorruptionDetector(
++                CorruptionDetectorModes.HistogramFlash,
++                () => new HistogramFlashEyeCorruptionDetector()),
++            var value when value == CorruptionDetectorModes.HybridRuntimeV2 => new SplitFrameCorruptionDetector(
++                CorruptionDetectorModes.HybridRuntimeV2,
++                () => new HybridRuntimeV2EyeCorruptionDetector()),
++            _ => new SplitFrameCorruptionDetector(
++                CorruptionDetectorModes.StockRow,
++                () => new StockRowEyeCorruptionDetector())
++        };
++    }
++}
++
++internal sealed class SplitFrameCorruptionDetector : IFrameCorruptionDetector
++{
++    private readonly IEyeFrameCorruptionDetector _leftDetector;
++    private readonly IEyeFrameCorruptionDetector _rightDetector;
++
++    public SplitFrameCorruptionDetector(string mode, Func<IEyeFrameCorruptionDetector> detectorFactory)
++    {
++        Mode = mode;
++        _leftDetector = detectorFactory();
++        _rightDetector = detectorFactory();
++    }
++
++    public string Mode { get; }
++
++    public (bool isCorrupted, double score, double threshold) IsCorrupted(Mat frame)
++    {
++        using var leftContext = EyeCorruptionFrameContext.Create(frame, left: true);
++        using var rightContext = EyeCorruptionFrameContext.Create(frame, left: false);
++
++        var left = _leftDetector.Evaluate(leftContext);
++        var right = _rightDetector.Evaluate(rightContext);
++
++        return (
++            left.IsCorrupted || right.IsCorrupted,
++            Math.Max(left.Score, right.Score),
++            Math.Max(left.Threshold, right.Threshold));
++    }
++
++    public void Dispose()
++    {
++        _leftDetector.Dispose();
++        _rightDetector.Dispose();
++    }
++}
++
++internal interface IEyeFrameCorruptionDetector : IDisposable
++{
++    CorruptionDetectionResult Evaluate(EyeCorruptionFrameContext frame);
++}
++
++internal sealed record CorruptionDetectionResult(bool IsCorrupted, double Score, double Threshold);
++
++internal sealed class StockRowEyeCorruptionDetector : IEyeFrameCorruptionDetector
++{
++    private readonly FastCorruptionDetector.FastCorruptionDetector _detector = new();
++
++    public CorruptionDetectionResult Evaluate(EyeCorruptionFrameContext frame)
++    {
++        var (isCorrupted, score, threshold) = _detector.IsCorrupted(frame.Gray);
++        return new CorruptionDetectionResult(isCorrupted, score, threshold);
++    }
++
++    public void Dispose()
++    {
++    }
++}
++
++internal sealed class HistogramFlashEyeCorruptionDetector : IEyeFrameCorruptionDetector
++{
++    private readonly Queue<double> _recentScores = new();
++    private double[]? _previousHistogram;
++    private double _previousMean;
++    private double _threshold = 0.18;
++    private int _frameCount;
++
++    public CorruptionDetectionResult Evaluate(EyeCorruptionFrameContext frame)
++    {
++        _frameCount++;
++
++        var histogram = DetectorMath.ComputeNormalizedHistogram(frame.Downsampled);
++        var histogramDistance = _previousHistogram == null ? 0 : DetectorMath.ComputeHistogramL1(histogram, _previousHistogram);
++        var meanJump = _frameCount == 1 ? 0 : Math.Abs(frame.Mean - _previousMean) / 255.0;
++        var score = histogramDistance + meanJump * 0.35 + Math.Max(frame.ClippedHighRatio, frame.ClippedLowRatio) * 0.5;
++
++        DetectorMath.UpdateMadThreshold(_recentScores, score, ref _threshold, multiplier: 8.0, minimum: 0.08);
++
++        var warmedUp = _frameCount > 15;
++        var isCorrupted = warmedUp && score > _threshold &&
++                          (meanJump > 0.05 || histogramDistance > _threshold || frame.ClippedHighRatio > 0.02 || frame.ClippedLowRatio > 0.02);
++
++        _previousHistogram = histogram;
++        _previousMean = frame.Mean;
++
++        return new CorruptionDetectionResult(isCorrupted, score, _threshold);
++    }
++
++    public void Dispose()
++    {
++    }
++}
++
++internal sealed class HybridRuntimeV2EyeCorruptionDetector : IEyeFrameCorruptionDetector
++{
++    private readonly Queue<double> _recentRowScores = new();
++    private readonly Queue<double> _recentTemporalScores = new();
++    private readonly Queue<double> _recentBoundaryScores = new();
++    private readonly Queue<double> _recentHistogramScores = new();
++    private readonly Queue<double> _recentEdgeScores = new();
++    private readonly Mat _edgeKernel = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(3, 3));
++    private Mat? _previousDownsampled;
++    private Mat? _previousEdges;
++    private double[]? _previousHistogram;
++    private double _previousMean;
++    private double _rowThreshold = 0.02;
++    private double _temporalThreshold = 0.14;
++    private double _boundaryThreshold = 0.18;
++    private double _histogramThreshold = 0.10;
++    private double _edgeThreshold = 0.18;
++    private int _frameCount;
++
++    public CorruptionDetectionResult Evaluate(EyeCorruptionFrameContext frame)
++    {
++        _frameCount++;
++
++        var rowScore = DetectorMath.ComputeBidirectionalStripeScore(frame.Downsampled);
++        var boundaryScore = DetectorMath.ComputeBoundaryArtifactScore(frame.Downsampled);
++
++        var histogram = DetectorMath.ComputeNormalizedHistogram(frame.Downsampled);
++        var histogramDistance = _previousHistogram == null ? 0 : DetectorMath.ComputeHistogramL1(histogram, _previousHistogram);
++        var meanJump = _frameCount == 1 ? 0 : Math.Abs(frame.Mean - _previousMean) / 255.0;
++        var histogramScore = histogramDistance + meanJump * 0.35 + Math.Max(frame.ClippedHighRatio, frame.ClippedLowRatio) * 0.5;
++
++        double temporalScore = 0;
++        if (_previousDownsampled != null)
++        {
++            using var diff = new Mat();
++            Cv2.Absdiff(frame.Downsampled, _previousDownsampled, diff);
++            temporalScore = Cv2.Mean(diff).Val0 / 255.0;
++        }
++
++        using var edges = new Mat();
++        Cv2.Canny(frame.Downsampled, edges, 40, 120);
++        double enteringRatio = 0;
++        double exitingRatio = 0;
++        if (_previousEdges != null)
++        {
++            using var dilatedPrevious = new Mat();
++            using var dilatedCurrent = new Mat();
++            using var invertedPrevious = new Mat();
++            using var invertedCurrent = new Mat();
++            using var entering = new Mat();
++            using var exiting = new Mat();
++
++            Cv2.Dilate(_previousEdges, dilatedPrevious, _edgeKernel);
++            Cv2.Dilate(edges, dilatedCurrent, _edgeKernel);
++            Cv2.BitwiseNot(dilatedPrevious, invertedPrevious);
++            Cv2.BitwiseNot(dilatedCurrent, invertedCurrent);
++            Cv2.BitwiseAnd(edges, invertedPrevious, entering);
++            Cv2.BitwiseAnd(_previousEdges, invertedCurrent, exiting);
++
++            var currentCount = Math.Max(1, Cv2.CountNonZero(edges));
++            var previousCount = Math.Max(1, Cv2.CountNonZero(_previousEdges));
++            enteringRatio = Cv2.CountNonZero(entering) / (double)currentCount;
++            exitingRatio = Cv2.CountNonZero(exiting) / (double)previousCount;
++        }
++
++        var edgeScore = Math.Max(enteringRatio, exitingRatio);
++        var saturationScore = Math.Max(frame.ClippedHighRatio, frame.ClippedLowRatio) * 2.0;
++        if (frame.StdDev < 8.0)
++            saturationScore += (8.0 - frame.StdDev) / 8.0;
++        if (frame.Mean > 245.0 || frame.Mean < 10.0)
++            saturationScore += 0.5;
++
++        DetectorMath.UpdateMadThreshold(_recentRowScores, rowScore, ref _rowThreshold, multiplier: 7.0, minimum: 0.01);
++        DetectorMath.UpdateMadThreshold(_recentTemporalScores, temporalScore, ref _temporalThreshold, multiplier: 8.0, minimum: 0.08);
++        DetectorMath.UpdateMadThreshold(_recentBoundaryScores, boundaryScore, ref _boundaryThreshold, multiplier: 8.0, minimum: 0.12);
++        DetectorMath.UpdateMadThreshold(_recentHistogramScores, histogramScore, ref _histogramThreshold, multiplier: 8.0, minimum: 0.08);
++        DetectorMath.UpdateMadThreshold(_recentEdgeScores, edgeScore, ref _edgeThreshold, multiplier: 8.0, minimum: 0.12);
++
++        var warmedUp = _frameCount > 45;
++        var isCorrupted = warmedUp && (
++            saturationScore > 0.8 ||
++            (histogramScore > _histogramThreshold && temporalScore > _temporalThreshold * 0.8) ||
++            (edgeScore > _edgeThreshold && (histogramScore > _histogramThreshold * 0.75 || saturationScore > 0.2)) ||
++            (boundaryScore > _boundaryThreshold && temporalScore > _temporalThreshold * 0.6) ||
++            (rowScore > _rowThreshold && temporalScore > _temporalThreshold * 0.8));
++
++        var normalizedComposite = Math.Max(
++            saturationScore / 0.8,
++            Math.Max(
++                histogramScore / Math.Max(_histogramThreshold, 1e-6),
++                Math.Max(
++                    edgeScore / Math.Max(_edgeThreshold, 1e-6),
++                    Math.Max(
++                        boundaryScore / Math.Max(_boundaryThreshold, 1e-6),
++                        Math.Max(
++                            rowScore / Math.Max(_rowThreshold, 1e-6),
++                            temporalScore / Math.Max(_temporalThreshold, 1e-6))))));
++
++        _previousDownsampled?.Dispose();
++        _previousDownsampled = frame.Downsampled.Clone();
++        _previousEdges?.Dispose();
++        _previousEdges = edges.Clone();
++        _previousHistogram = histogram;
++        _previousMean = frame.Mean;
++
++        return new CorruptionDetectionResult(isCorrupted, normalizedComposite, 1.0);
++    }
++
++    public void Dispose()
++    {
++        _previousDownsampled?.Dispose();
++        _previousEdges?.Dispose();
++        _edgeKernel.Dispose();
++    }
++}
++
++internal sealed class EyeCorruptionFrameContext : IDisposable
++{
++    private EyeCorruptionFrameContext(Mat gray, Mat downsampled, double mean, double stdDev, double clippedLowRatio, double clippedHighRatio)
++    {
++        Gray = gray;
++        Downsampled = downsampled;
++        Mean = mean;
++        StdDev = stdDev;
++        ClippedLowRatio = clippedLowRatio;
++        ClippedHighRatio = clippedHighRatio;
++    }
++
++    public Mat Gray { get; }
++    public Mat Downsampled { get; }
++    public double Mean { get; }
++    public double StdDev { get; }
++    public double ClippedLowRatio { get; }
++    public double ClippedHighRatio { get; }
++
++    public static EyeCorruptionFrameContext Create(Mat frame, bool left)
++    {
++        var halfWidth = Math.Max(1, frame.Width / 2);
++        var width = Math.Min(halfWidth, frame.Width);
++        var x = left ? 0 : Math.Max(0, frame.Width - width);
++
++        using var roi = new Mat(frame, new Rect(x, 0, width, frame.Height));
++
++        var gray = new Mat();
++        if (roi.Channels() == 1)
++            roi.CopyTo(gray);
++        else
++            Cv2.CvtColor(roi, gray, ColorConversionCodes.BGR2GRAY);
++
++        var downsampled = new Mat();
++        Cv2.Resize(gray, downsampled, new Size(64, 64), interpolation: InterpolationFlags.Area);
++
++        Cv2.MeanStdDev(downsampled, out var mean, out var stddev);
++        var pixelCount = downsampled.Rows * downsampled.Cols;
++        var clippedLow = CountWithinThreshold(downsampled, 0, 3) / (double)pixelCount;
++        var clippedHigh = CountWithinThreshold(downsampled, 252, 255) / (double)pixelCount;
++
++        return new EyeCorruptionFrameContext(gray, downsampled, mean.Val0, stddev.Val0, clippedLow, clippedHigh);
++    }
++
++    public void Dispose()
++    {
++        Downsampled.Dispose();
++        Gray.Dispose();
++    }
++
++    private static int CountWithinThreshold(Mat mat, byte min, byte max)
++    {
++        var count = 0;
++        for (var y = 0; y < mat.Rows; y++)
++        {
++            for (var x = 0; x < mat.Cols; x++)
++            {
++                var value = mat.Get<byte>(y, x);
++                if (value >= min && value <= max)
++                    count++;
++            }
++        }
++
++        return count;
++    }
++}
++
++internal static class DetectorMath
++{
++    public static double ComputeBidirectionalStripeScore(Mat frame)
++    {
++        var rowScore = ComputeSignalSecondDerivativeScore(GetRowMeans(frame));
++        var columnScore = ComputeSignalSecondDerivativeScore(GetColumnMeans(frame));
++        return Math.Max(rowScore, columnScore);
++    }
++
++    public static double[] GetRowMeans(Mat frame)
++    {
++        var means = new double[frame.Rows];
++        for (var y = 0; y < frame.Rows; y++)
++        {
++            double sum = 0;
++            for (var x = 0; x < frame.Cols; x++)
++                sum += frame.Get<byte>(y, x);
++
++            means[y] = sum / frame.Cols / 255.0;
++        }
++
++        return means;
++    }
++
++    public static double[] GetColumnMeans(Mat frame)
++    {
++        var means = new double[frame.Cols];
++        for (var x = 0; x < frame.Cols; x++)
++        {
++            double sum = 0;
++            for (var y = 0; y < frame.Rows; y++)
++                sum += frame.Get<byte>(y, x);
++
++            means[x] = sum / frame.Rows / 255.0;
++        }
++
++        return means;
++    }
++
++    public static double ComputeSignalSecondDerivativeScore(double[] signal)
++    {
++        if (signal.Length < 3)
++            return 0;
++
++        var secondDiffs = new double[signal.Length - 2];
++        for (var i = 0; i < secondDiffs.Length; i++)
++            secondDiffs[i] = Math.Abs(signal[i + 2] - 2 * signal[i + 1] + signal[i]);
++
++        Array.Sort(secondDiffs);
++        var index = Math.Min(secondDiffs.Length - 1, (int)Math.Floor(secondDiffs.Length * 0.95));
++        return secondDiffs[index];
++    }
++
++    public static void UpdateMadThreshold(Queue<double> queue, double score, ref double threshold, double multiplier, double minimum, int window = 180)
++    {
++        queue.Enqueue(score);
++        while (queue.Count > window)
++            queue.Dequeue();
++
++        if (queue.Count < 30)
++            return;
++
++        var values = queue.OrderBy(v => v).ToArray();
++        var median = values[values.Length / 2];
++        var deviations = values.Select(v => Math.Abs(v - median)).OrderBy(v => v).ToArray();
++        var mad = deviations[deviations.Length / 2];
++        threshold = Math.Max(minimum, median + multiplier * mad);
++    }
++
++    public static double ComputeBoundaryArtifactScore(Mat frame, int blockSize = 8)
++    {
++        var horizontalBoundary = 0.0;
++        var horizontalInterior = 0.0;
++        var verticalBoundary = 0.0;
++        var verticalInterior = 0.0;
++        var horizontalBoundaryCount = 0;
++        var horizontalInteriorCount = 0;
++        var verticalBoundaryCount = 0;
++        var verticalInteriorCount = 0;
++
++        for (var y = 0; y < frame.Rows; y++)
++        {
++            for (var x = 0; x < frame.Cols - 1; x++)
++            {
++                var diff = Math.Abs(frame.Get<byte>(y, x + 1) - frame.Get<byte>(y, x)) / 255.0;
++                if ((x + 1) % blockSize == 0)
++                {
++                    horizontalBoundary += diff;
++                    horizontalBoundaryCount++;
++                }
++                else
++                {
++                    horizontalInterior += diff;
++                    horizontalInteriorCount++;
++                }
++            }
++        }
++
++        for (var y = 0; y < frame.Rows - 1; y++)
++        {
++            for (var x = 0; x < frame.Cols; x++)
++            {
++                var diff = Math.Abs(frame.Get<byte>(y + 1, x) - frame.Get<byte>(y, x)) / 255.0;
++                if ((y + 1) % blockSize == 0)
++                {
++                    verticalBoundary += diff;
++                    verticalBoundaryCount++;
++                }
++                else
++                {
++                    verticalInterior += diff;
++                    verticalInteriorCount++;
++                }
++            }
++        }
++
++        var horizontalRatio = (horizontalBoundary / Math.Max(1, horizontalBoundaryCount)) /
++                              Math.Max(1e-6, horizontalInterior / Math.Max(1, horizontalInteriorCount));
++        var verticalRatio = (verticalBoundary / Math.Max(1, verticalBoundaryCount)) /
++                            Math.Max(1e-6, verticalInterior / Math.Max(1, verticalInteriorCount));
++        return Math.Max(horizontalRatio, verticalRatio) - 1.0;
++    }
++
++    public static double[] ComputeNormalizedHistogram(Mat frame, int bins = 32)
++    {
++        var histogram = new double[bins];
++        var total = frame.Rows * frame.Cols;
++        if (total == 0)
++            return histogram;
++
++        for (var y = 0; y < frame.Rows; y++)
++        {
++            for (var x = 0; x < frame.Cols; x++)
++            {
++                var value = frame.Get<byte>(y, x);
++                var index = Math.Min(bins - 1, value * bins / 256);
++                histogram[index]++;
++            }
++        }
++
++        for (var i = 0; i < histogram.Length; i++)
++            histogram[i] /= total;
++
++        return histogram;
++    }
++
++    public static double ComputeHistogramL1(double[] current, double[] previous)
++    {
++        var sum = 0.0;
++        var count = Math.Min(current.Length, previous.Length);
++        for (var i = 0; i < count; i++)
++            sum += Math.Abs(current[i] - previous[i]);
++
++        return sum * 0.5;
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/IFrameWaitSource.cs b/src/Baballonia/Services/Inference/IFrameWaitSource.cs
+new file mode 100644
+index 0000000..c133217
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/IFrameWaitSource.cs
+@@ -0,0 +1,9 @@
++using System;
++using System.Threading;
++
++namespace Baballonia.Services.Inference;
++
++public interface IFrameWaitSource
++{
++    bool WaitForFrameAfter(long lastSeenSequence, TimeSpan timeout, CancellationToken cancellationToken);
++}
+diff --git a/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs b/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs
+index 2c4522e..fbc1c66 100644
+--- a/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs
++++ b/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs
+@@ -1,4 +1,4 @@
+-using Baballonia.Services.Inference.Enums;
++﻿using Baballonia.Services.Inference.Enums;
+ using OpenCvSharp;
+ using System;
+ 
+@@ -8,18 +8,59 @@ public class DualCameraSource : IVideoSource
+ {
+     public IVideoSource? LeftCam;
+     public IVideoSource? RightCam;
++    public long LastDeliveredFrameSequence
++    {
++        get
++        {
++            var left = LeftCam?.LastDeliveredFrameSequence ?? 0;
++            var right = RightCam?.LastDeliveredFrameSequence ?? 0;
++            return unchecked((left * 397) ^ right);
++        }
++    }
++
++    public long LastDeliveredFrameTimestampTick
++    {
++        get
++        {
++            var left = LeftCam?.LastDeliveredFrameTimestampTick ?? 0;
++            var right = RightCam?.LastDeliveredFrameTimestampTick ?? 0;
++            return Math.Max(left, right);
++        }
++    }
++
++    public string SourceDescription => $"{LeftCam?.SourceDescription ?? "null"}|{RightCam?.SourceDescription ?? "null"}";
++
++    public long FrameSequence
++    {
++        get
++        {
++            var left = LeftCam?.FrameSequence ?? 0;
++            var right = RightCam?.FrameSequence ?? 0;
++            return unchecked((left * 397) ^ right);
++        }
++    }
++
++    public long LatestFrameTimestampTick
++    {
++        get
++        {
++            var left = LeftCam?.LatestFrameTimestampTick ?? 0;
++            var right = RightCam?.LatestFrameTimestampTick ?? 0;
++            return Math.Max(left, right);
++        }
++    }
+ 
+     private Mat? LastLeftImage;
+     private Mat? LastRightImage;
+ 
+     public bool Start()
+     {
+-        return (LeftCam?.Stop() ?? true) && (RightCam?.Stop() ?? true);
++        return (LeftCam?.Start() ?? true) && (RightCam?.Start() ?? true);
+     }
+ 
+     public bool Stop()
+     {
+-        return (LeftCam?.Start() ?? true) && (RightCam?.Start() ?? true);
++        return (LeftCam?.Stop() ?? true) && (RightCam?.Stop() ?? true);
+     }
+ 
+     // Here we try to acquire 2 images from both cameras and stitch them into a single image
+@@ -36,60 +77,71 @@ public class DualCameraSource : IVideoSource
+         var leftIsNew = leftImage != null;
+         var rightIsNew = rightImage != null;
+ 
+-        leftImage ??= LastLeftImage;
+-        rightImage ??= LastRightImage;
+-
+-        switch (leftImage)
+-        {
+-            case null when rightImage == null:
+-                return null;
+-            case null:
+-                leftImage = rightImage.Clone();
+-                break;
+-            default:
+-                // Don't clone - preserve both cameras when both are available!
+-                if (rightImage == null)
+-                    rightImage = leftImage.Clone();
+-                break;
+-        }
+-
+-        int minHeight = Math.Min(leftImage.Rows, rightImage.Rows);
+-        int minWidth = Math.Min(leftImage.Cols, rightImage.Cols);
+-
+-
+-        Mat resizedLeft = new Mat();
+-        Mat resizedRight = new Mat();
+-        Cv2.Resize(leftImage, resizedLeft, new Size(minWidth, minHeight));
+-        Cv2.Resize(rightImage, resizedRight, new Size(minWidth, minHeight));
+-
+-        int height = Math.Max(resizedRight.Rows, resizedLeft.Rows);
+-        int width = resizedRight.Cols + resizedLeft.Cols;
+-
+-        Mat result = new Mat(height, width, resizedLeft.Type(), Scalar.All(0));
+-
+-        resizedLeft.CopyTo(result[new Rect(0, 0, resizedLeft.Cols, resizedRight.Rows)]);
+-        resizedRight.CopyTo(result[new Rect(resizedLeft.Cols, 0, resizedRight.Cols, resizedRight.Rows)]);
+-
+-        // Update last images only for new frames
+-        if (leftIsNew)
++        Mat? clonedLeft = null;
++        Mat? clonedRight = null;
++        try
+         {
+-            LastLeftImage?.Dispose();
+-            LastLeftImage = resizedLeft.Clone();
++            var effectiveLeft = leftImage ?? LastLeftImage;
++            var effectiveRight = rightImage ?? LastRightImage;
++
++            switch (effectiveLeft)
++            {
++                case null when effectiveRight == null:
++                    return null;
++                case null:
++                    clonedLeft = effectiveRight!.Clone();
++                    effectiveLeft = clonedLeft;
++                    break;
++                default:
++                    if (effectiveRight == null)
++                    {
++                        clonedRight = effectiveLeft.Clone();
++                        effectiveRight = clonedRight;
++                    }
++                    break;
++            }
++
++            int minHeight = Math.Min(effectiveLeft.Rows, effectiveRight.Rows);
++            int minWidth = Math.Min(effectiveLeft.Cols, effectiveRight.Cols);
++
++            using var resizedLeft = new Mat();
++            using var resizedRight = new Mat();
++            Cv2.Resize(effectiveLeft, resizedLeft, new Size(minWidth, minHeight));
++            Cv2.Resize(effectiveRight, resizedRight, new Size(minWidth, minHeight));
++
++            int height = Math.Max(resizedRight.Rows, resizedLeft.Rows);
++            int width = resizedRight.Cols + resizedLeft.Cols;
++
++            Mat result = new Mat(height, width, resizedLeft.Type(), Scalar.All(0));
++
++            resizedLeft.CopyTo(result[new Rect(0, 0, resizedLeft.Cols, resizedRight.Rows)]);
++            resizedRight.CopyTo(result[new Rect(resizedLeft.Cols, 0, resizedRight.Cols, resizedRight.Rows)]);
++
++            if (leftIsNew)
++            {
++                LastLeftImage?.Dispose();
++                LastLeftImage = resizedLeft.Clone();
++            }
++
++            if (rightIsNew)
++            {
++                LastRightImage?.Dispose();
++                LastRightImage = resizedRight.Clone();
++            }
++
++            return result;
+         }
+-
+-        if (rightIsNew)
++        finally
+         {
+-            LastRightImage?.Dispose();
+-            LastRightImage = resizedRight.Clone();
+-        }
++            clonedLeft?.Dispose();
++            clonedRight?.Dispose();
+ 
+-        // Only dispose new images, not the cached LastImages
+-        if (leftIsNew)
+-            resizedLeft.Dispose();
+-        if (rightIsNew)
+-            resizedRight.Dispose();
++            if (leftIsNew)
++                leftImage?.Dispose();
+ 
+-        return result;
++            if (rightIsNew)
++                rightImage?.Dispose();
++        }
+     }
+ 
+     public void Dispose()
+diff --git a/src/Baballonia/Services/Inference/VideoSources/SingleCameraSource.cs b/src/Baballonia/Services/Inference/VideoSources/SingleCameraSource.cs
+index b3ac6c9..38f436b 100644
+--- a/src/Baballonia/Services/Inference/VideoSources/SingleCameraSource.cs
++++ b/src/Baballonia/Services/Inference/VideoSources/SingleCameraSource.cs
+@@ -1,16 +1,29 @@
+ ﻿using Baballonia.SDK;
++using Baballonia.Services.Inference;
+ using Baballonia.Services.Inference.Enums;
+ using Microsoft.Extensions.Logging;
+ using OpenCvSharp;
++using System;
++using System.Threading;
+ 
+ namespace Baballonia.Services.Inference.VideoSources;
+ 
+-public class SingleCameraSource : IVideoSource
++public class SingleCameraSource : IVideoSource, IFrameWaitSource
+ {
+     private ILogger _logger;
+     public Size CameraSize;
+     private string _cameraAddress;
+     private readonly Capture _capture;
++    private long _requestCount;
++    private long _nullRawMatCount;
++    private long _returnedFrameCount;
++    private long _lastLogTick;
++    private long _lastDeliveredFrameSequence;
++    private long _lastDeliveredFrameTimestampTick;
++    public long FrameSequence => _capture.LatestFrameSequence;
++    public long LastDeliveredFrameSequence => Interlocked.Read(ref _lastDeliveredFrameSequence);
++    public long LastDeliveredFrameTimestampTick => Interlocked.Read(ref _lastDeliveredFrameTimestampTick);
++    public string SourceDescription => _cameraAddress;
+ 
+     public SingleCameraSource(
+         ILogger logger,
+@@ -25,14 +38,14 @@ public class SingleCameraSource : IVideoSource
+ 
+     public bool Start()
+     {
+-        _capture.StartCapture();
+-        return true;
++        return _capture.StartCapture().GetAwaiter().GetResult();
+     }
+ 
++    public long LatestFrameTimestampTick => _capture.LatestFrameTimestampTick;
++
+     public bool Stop()
+     {
+-        _capture.StopCapture();
+-        return true;
++        return _capture.StopCapture().GetAwaiter().GetResult();
+     }
+ 
+     /// <summary>
+@@ -42,12 +55,15 @@ public class SingleCameraSource : IVideoSource
+     /// <returns>captured image</returns>
+     public Mat? GetFrame(ColorType? color = null)
+     {
+-        if (!_capture.IsReady) return null;
+-
+-
+-        var rawMat = _capture.AcquireRawMat();
++        Interlocked.Increment(ref _requestCount);
++        var snapshot = _capture.AcquireRawFrameSnapshot();
++        var rawMat = snapshot.Frame;
+         if (rawMat == null)
++        {
++            Interlocked.Increment(ref _nullRawMatCount);
++            LogFrameState("raw-null");
+             return null;
++        }
+ 
+         CameraSize.Width = rawMat.Width;
+         CameraSize.Height = rawMat.Height;
+@@ -69,21 +85,52 @@ public class SingleCameraSource : IVideoSource
+                         ColorType.Rgb24 => ColorConversionCodes.GRAY2RGB,
+                         ColorType.Rgba32 => ColorConversionCodes.GRAY2RGBA,
+                     }
+-                    : color switch
+-                    {
+-                        ColorType.Gray8 => ColorConversionCodes.BGR2GRAY,
+-                        ColorType.Rgb24 => ColorConversionCodes.BGR2RGB,
+-                        ColorType.Rgba32 => ColorConversionCodes.BGR2RGBA,
+-                    });
++                     : color switch
++                     {
++                         ColorType.Gray8 => ColorConversionCodes.BGR2GRAY,
++                         ColorType.Rgb24 => ColorConversionCodes.BGR2RGB,
++                         ColorType.Rgba32 => ColorConversionCodes.BGR2RGBA,
++                     });
+             image = convertedMat;
++            rawMat.Dispose();
+         }
+ 
+-
++        Interlocked.Exchange(ref _lastDeliveredFrameSequence, snapshot.Sequence);
++        Interlocked.Exchange(ref _lastDeliveredFrameTimestampTick, snapshot.TimestampTick);
++        Interlocked.Increment(ref _returnedFrameCount);
++        LogFrameState("returned", image);
+         return image;
+     }
+ 
+     public void Dispose()
+     {
+         Stop();
++        _capture.Dispose();
++    }
++
++    public bool WaitForFrameAfter(long lastSeenSequence, TimeSpan timeout, CancellationToken cancellationToken)
++    {
++        return _capture.WaitForNewFrame(lastSeenSequence, timeout, cancellationToken);
++    }
++
++    private void LogFrameState(string stage, Mat? image = null)
++    {
++        var nowTick = Environment.TickCount64;
++        var lastTick = Interlocked.Read(ref _lastLogTick);
++        if (nowTick - lastTick < 2000)
++            return;
++
++        Interlocked.Exchange(ref _lastLogTick, nowTick);
++        _logger.LogInformation(
++            "SingleCameraSource {Stage}: address={Address} requests={Requests} rawNull={RawNull} returned={Returned} captureReady={CaptureReady} frame={Width}x{Height}x{Channels}",
++            stage,
++            _cameraAddress,
++            Interlocked.Read(ref _requestCount),
++            Interlocked.Read(ref _nullRawMatCount),
++            Interlocked.Read(ref _returnedFrameCount),
++            _capture.IsReady,
++            image?.Width ?? 0,
++            image?.Height ?? 0,
++            image?.Channels() ?? 0);
+     }
+ }
+diff --git a/src/Baballonia/Services/MainStandalone.cs b/src/Baballonia/Services/MainStandalone.cs
+index a3188a1..57b213a 100644
+--- a/src/Baballonia/Services/MainStandalone.cs
++++ b/src/Baballonia/Services/MainStandalone.cs
+@@ -1,6 +1,7 @@
+-﻿using Baballonia.Contracts;
++using Baballonia.Contracts;
+ using Microsoft.Extensions.Logging;
+ using System;
++using System.Diagnostics;
+ using System.Threading.Tasks;
+ 
+ namespace Baballonia.Services;
+@@ -25,6 +26,8 @@ public class MainStandalone : IMainService
+         {
+             _logger.LogWarning($"TimeBeginPeriod failed with HRESULT {timeEndRes}");
+         }
++
++        TryElevateProcessPriority();
+     }
+ 
+     public Task Teardown()
+@@ -51,4 +54,21 @@ public class MainStandalone : IMainService
+         _logger.LogDebug("Starting OSC update loop...");
+         return Task.CompletedTask;
+     }
++
++    private void TryElevateProcessPriority()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        try
++        {
++            using var currentProcess = Process.GetCurrentProcess();
++            currentProcess.PriorityClass = ProcessPriorityClass.Normal;
++            _logger.LogDebug("Set Baballonia process priority to {PriorityClass}", currentProcess.PriorityClass);
++        }
++        catch (Exception ex)
++        {
++            _logger.LogDebug(ex, "Failed to elevate Baballonia process priority");
++        }
++    }
+ }
+diff --git a/src/Baballonia/Services/OscSendService.cs b/src/Baballonia/Services/OscSendService.cs
+index 5486e65..00be572 100644
+--- a/src/Baballonia/Services/OscSendService.cs
++++ b/src/Baballonia/Services/OscSendService.cs
+@@ -2,6 +2,7 @@
+ using Microsoft.Extensions.Logging;
+ using OscCore;
+ using System;
++using System.Collections.Generic;
+ using System.Net;
+ using System.Net.Sockets;
+ using System.Threading;
+@@ -19,6 +20,7 @@ public abstract class OscSendService(
+     public event Action<int> OnMessagesDispatched = _ => { };
+     protected readonly IOscTarget OscTarget = oscTarget;
+     private Socket _sendSocket;
++    private byte[] _sendBuffer = new byte[512];
+ 
+     protected void UpdateTarget(IPEndPoint endpoint)
+     {
+@@ -51,8 +53,7 @@ public abstract class OscSendService(
+ 
+         try
+         {
+-            var ip = IPEndPoint.Parse(OscTarget.DestinationAddress);
+-            await _sendSocket.SendToAsync(message.ToByteArray(), SocketFlags.None, ip, ct);
++            await SendMessage(message, ct);
+             OnMessagesDispatched(1);
+         }
+         catch (Exception ex)
+@@ -61,7 +62,7 @@ public abstract class OscSendService(
+         }
+     }
+ 
+-    public async Task Send(OscMessage[] messages, CancellationToken ct)
++    public async Task Send(IReadOnlyList<OscMessage> messages, CancellationToken ct)
+     {
+         if (_sendSocket is not { Connected: true })
+         {
+@@ -70,16 +71,33 @@ public abstract class OscSendService(
+ 
+         try
+         {
+-            foreach (var message in messages)
++            for (var i = 0; i < messages.Count; i++)
+             {
+-                await _sendSocket.SendAsync(message.ToByteArray(), SocketFlags.None, ct);
++                await SendMessage(messages[i], ct);
+             }
+ 
+-            OnMessagesDispatched(messages.Length);
++            OnMessagesDispatched(messages.Count);
+         }
+         catch (Exception ex)
+         {
+             logger.LogError(ex, "Error sending OSC bundle");
+         }
+     }
++
++    public Task Send(OscMessage[] messages, CancellationToken ct) => Send((IReadOnlyList<OscMessage>)messages, ct);
++
++    private async Task SendMessage(OscMessage message, CancellationToken ct)
++    {
++        EnsureBufferSize(message.SizeInBytes);
++        var length = message.Write(_sendBuffer, 0);
++        await _sendSocket!.SendAsync(_sendBuffer.AsMemory(0, length), SocketFlags.None, ct);
++    }
++
++    private void EnsureBufferSize(int requiredLength)
++    {
++        if (_sendBuffer.Length >= requiredLength)
++            return;
++
++        Array.Resize(ref _sendBuffer, requiredLength);
++    }
+ }
+diff --git a/src/Baballonia/Services/ParameterSenderService.cs b/src/Baballonia/Services/ParameterSenderService.cs
+index ff56038..c329f7f 100644
+--- a/src/Baballonia/Services/ParameterSenderService.cs
++++ b/src/Baballonia/Services/ParameterSenderService.cs
+@@ -4,9 +4,8 @@ using Microsoft.Extensions.Hosting;
+ using Microsoft.Extensions.Logging;
+ using OscCore;
+ using System;
+-using System.Collections.Concurrent;
+ using System.Collections.Generic;
+-using System.Linq;
++using System.Diagnostics;
+ using System.Threading;
+ using System.Threading.Tasks;
+ 
+@@ -14,17 +13,34 @@ namespace Baballonia.Services;
+ 
+ public class ParameterSenderService : BackgroundService
+ {
++    private const string VrcftFrameReadyAddress = "/vrcft/babble/frameReady";
+     private readonly VrcftModuleSendService _vrcftModuleSendService;
+     private readonly DfrSendService _dfrSendService;
+     private readonly ILocalSettingsService _localSettingsService;
+     private readonly ICalibrationService _calibrationService;
++    private readonly ProcessingLoopService _processingLoopService;
+     private readonly ILogger<ParameterSenderService> _logger;
++    private readonly object _expressionLock = new();
++    private readonly SemaphoreSlim _pendingExpressionsSignal = new(0, 1);
+ 
+     private string _prefix = "";
+     private bool _sendNativeVrcEyeTracking;
+     private bool _useDfr;
+-    private readonly ConcurrentQueue<OscMessage> _vrcftQueue = new();
+-    private readonly ConcurrentQueue<OscMessage> _dfrQueue = new();
++    private ProcessingLoopService.Expressions _latestExpressions;
++    private bool _hasPendingExpressions;
++    private long _nextSettingsRefreshTick;
++    private long _lastLatencyLogTick;
++    private long _oscLatencyTicks;
++    private long _oscLatencySamples;
++    private long _oscLatencyMaxTicks;
++    private long _currentExpressionProducedTick;
++    private long _cameraToOscLatencyTicks;
++    private long _cameraToOscLatencySamples;
++    private long _cameraToOscLatencyMaxTicks;
++    private long _currentEyeFrameCapturedTick;
++    private int _vrcftFrameSyncSequence;
++    private readonly List<OscMessage> _vrcftQueue = new(64);
++    private readonly List<OscMessage> _dfrQueue = new(16);
+ 
+     // Expression parameter names
+     private readonly Dictionary<string, string> _eyeExpressionMap = new()
+@@ -104,9 +120,11 @@ public class ParameterSenderService : BackgroundService
+         this._dfrSendService = dfrSendService;
+         this._localSettingsService = localSettingsService;
+         this._calibrationService = calibrationService;
++        this._processingLoopService = processingLoopService;
+         this._logger = logger;
+ 
+-         processingLoopService.ExpressionChangeEvent += ExpressionUpdateHandler;
++        RefreshRuntimeSettings(force: true);
++        _processingLoopService.ExpressionChangeEvent += ExpressionUpdateHandler;
+     }
+ 
+     protected override async Task ExecuteAsync(CancellationToken cancellationToken)
+@@ -115,25 +133,78 @@ public class ParameterSenderService : BackgroundService
+         _logger.LogDebug("OSC parameter mapping initialized with {EyeCount} eye expressions and {FaceCount} face expressions",
+             _eyeExpressionMap.Count, FaceExpressionMap.Count);
+ 
+-        while (!cancellationToken.IsCancellationRequested)
++        try
+         {
+-            try
++            while (!cancellationToken.IsCancellationRequested)
+             {
+-                _prefix = _localSettingsService.ReadSetting<string>("AppSettings_OSCPrefix");
+-                _sendNativeVrcEyeTracking = _localSettingsService.ReadSetting<bool>("VRC_UseNativeTracking");
+-                _useDfr = _localSettingsService.ReadSetting<bool>("AppSettings_UseDFR");
+-                await SendAndClearQueue(cancellationToken);
+-                await Task.Delay(10, cancellationToken);
++                try
++                {
++                    RefreshRuntimeSettings();
++                    if (!_hasPendingExpressions)
++                    {
++                        await _pendingExpressionsSignal.WaitAsync(TimeSpan.FromMilliseconds(500), cancellationToken);
++                        RefreshRuntimeSettings();
++                    }
++
++                    DrainPendingExpressions();
++                    await SendAndClearQueue(cancellationToken);
++                }
++                catch (Exception ex) when (ex is not OperationCanceledException)
++                {
++                    _logger.LogDebug(ex, "Ignoring non-fatal exception in parameter sender loop");
++                }
+             }
+-            catch (Exception)
++        }
++        catch (OperationCanceledException)
++        {
++            // Normal shutdown.
++        }
++    }
++
++    private void ExpressionUpdateHandler(ProcessingLoopService.Expressions expressions)
++    {
++        var shouldSignal = false;
++        lock (_expressionLock)
++        {
++            _latestExpressions = expressions;
++            if (!_hasPendingExpressions)
+             {
+-                // ignore
++                _hasPendingExpressions = true;
++                shouldSignal = true;
+             }
+         }
++
++        if (shouldSignal && _pendingExpressionsSignal.CurrentCount == 0)
++            _pendingExpressionsSignal.Release();
+     }
+ 
+-    private void ExpressionUpdateHandler(ProcessingLoopService.Expressions expressions)
++    private void RefreshRuntimeSettings(bool force = false)
++    {
++        var now = Environment.TickCount64;
++        if (!force && now < Interlocked.Read(ref _nextSettingsRefreshTick))
++            return;
++
++        _prefix = _localSettingsService.ReadSetting<string>("AppSettings_OSCPrefix", "") ?? "";
++        _sendNativeVrcEyeTracking = _localSettingsService.ReadSetting<bool>("VRC_UseNativeTracking");
++        _useDfr = _localSettingsService.ReadSetting<bool>("AppSettings_UseDFR");
++        Interlocked.Exchange(ref _nextSettingsRefreshTick, now + 500);
++    }
++
++    private void DrainPendingExpressions()
+     {
++        ProcessingLoopService.Expressions expressions;
++        lock (_expressionLock)
++        {
++            if (!_hasPendingExpressions)
++                return;
++
++            expressions = _latestExpressions;
++            _hasPendingExpressions = false;
++        }
++
++        _currentExpressionProducedTick = expressions.ProducedAtTick;
++        _currentEyeFrameCapturedTick = expressions.EyeFrameCapturedAtTick;
++
+         if (expressions.EyeExpression != null)
+             ProcessEyeExpressionData(expressions.EyeExpression);
+         if (expressions.FaceExpression != null)
+@@ -145,15 +216,18 @@ public class ParameterSenderService : BackgroundService
+         if (expressions is null) return;
+         if (expressions.Length == 0) return;
+ 
+-        for (var i = 0; i < Math.Min(expressions.Length, _eyeExpressionMap.Count); i++)
++        var expressionIndex = 0;
++        foreach (var eyeElement in _eyeExpressionMap)
+         {
+-            var weight = expressions[i];
+-            var eyeElement = _eyeExpressionMap.ElementAt(i);
++            if (expressionIndex >= expressions.Length)
++                break;
++
++            var weight = SanitizeEyeValue(eyeElement.Key, expressions[expressionIndex++]);
+             var settings = _calibrationService.GetExpressionSettings(eyeElement.Key);
+ 
+             var msg = new OscMessage(_prefix + eyeElement.Value,
+-                weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max));
+-            _vrcftQueue.Enqueue(msg);
++                ClampFinite(weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max), settings.Min, settings.Max));
++            _vrcftQueue.Add(msg);
+         }
+ 
+         if (_useDfr)
+@@ -163,21 +237,21 @@ public class ParameterSenderService : BackgroundService
+             ProcessNativeVrcEyeTracking(expressions, _vrcftQueue);
+     }
+ 
+-    private void ProcessNativeVrcEyeTracking(float[] expressions, ConcurrentQueue<OscMessage> queue)
++    private void ProcessNativeVrcEyeTracking(float[] expressions, List<OscMessage> queue)
+     {
+-        var leftEyeX = expressions[0];
+-        var leftEyeY = expressions[1];
+-        var leftEyeLid = expressions[2];
+-        var rightEyeX = expressions[3];
+-        var rightEyeY = expressions[4];
+-        var rightEyeLid = expressions[5];
++        var leftEyeX = SanitizeEyeValue("LeftEyeX", expressions[0]);
++        var leftEyeY = SanitizeEyeValue("LeftEyeY", expressions[1]);
++        var leftEyeLid = SanitizeEyeValue("LeftEyeLid", expressions[2]);
++        var rightEyeX = SanitizeEyeValue("RightEyeX", expressions[3]);
++        var rightEyeY = SanitizeEyeValue("RightEyeY", expressions[4]);
++        var rightEyeLid = SanitizeEyeValue("RightEyeLid", expressions[5]);
+ 
+         var leftEyeLidSettings = _calibrationService.GetExpressionSettings("LeftEyeLid");
+         var rightEyeLidSettings = _calibrationService.GetExpressionSettings("RightEyeLid");
+         var weightedLeftEyeLid = leftEyeLid.Remap(leftEyeLidSettings.Lower, leftEyeLidSettings.Upper, leftEyeLidSettings.Min, leftEyeLidSettings.Max);
+         var weightedRightEyeLid = rightEyeLid.Remap(rightEyeLidSettings.Lower, rightEyeLidSettings.Upper, rightEyeLidSettings.Min, rightEyeLidSettings.Max);
+         var averageLid = (weightedLeftEyeLid + weightedRightEyeLid) / 2f;
+-        queue.Enqueue(new OscMessage("/tracking/eye/EyesClosedAmount", 1f - Math.Clamp(averageLid, 0f, 1f)));
++        queue.Add(new OscMessage("/tracking/eye/EyesClosedAmount", 1f - Math.Clamp(averageLid, 0f, 1f)));
+ 
+         // Convert normalized eye positions to angles
+         const float maxEyeAngle = 45f;
+@@ -185,7 +259,28 @@ public class ParameterSenderService : BackgroundService
+         leftEyeY *= -maxEyeAngle; // Negative because Y is inverted (up is negative pitch)
+         rightEyeX *= maxEyeAngle;
+         rightEyeY *= -maxEyeAngle; // Negative because Y is inverted (up is negative pitch)
+-        queue.Enqueue(new OscMessage("/tracking/eye/LeftRightPitchYaw", leftEyeY, rightEyeX, rightEyeY, leftEyeX));
++        queue.Add(new OscMessage("/tracking/eye/LeftRightPitchYaw", leftEyeY, rightEyeX, rightEyeY, leftEyeX));
++    }
++
++    private static float SanitizeEyeValue(string key, float value)
++    {
++        if (!float.IsFinite(value))
++            return 0f;
++
++        return key switch
++        {
++            "LeftEyeLid" or "RightEyeLid" => Math.Clamp(value, 0f, 1f),
++            "LeftEyeX" or "LeftEyeY" or "RightEyeX" or "RightEyeY" => Math.Clamp(value, -1f, 1f),
++            _ => value
++        };
++    }
++
++    private static float ClampFinite(float value, float min, float max)
++    {
++        if (!float.IsFinite(value))
++            return min;
++
++        return Math.Clamp(value, min, max);
+     }
+ 
+     private void ProcessFaceExpressionData(float[] expressions)
+@@ -193,10 +288,13 @@ public class ParameterSenderService : BackgroundService
+         if (expressions == null) return;
+         if (expressions.Length == 0) return;
+ 
+-        for (var i = 0; i < Math.Min(expressions.Length, FaceExpressionMap.Count); i++)
++        var expressionIndex = 0;
++        foreach (var faceElement in FaceExpressionMap)
+         {
+-            var weight = expressions[i];
+-            var faceElement = FaceExpressionMap.ElementAt(i);
++            if (expressionIndex >= expressions.Length)
++                break;
++
++            var weight = expressions[expressionIndex++];
+             var settings = _calibrationService.GetExpressionSettings(faceElement.Key);
+ 
+             var msg = new OscMessage(_prefix + faceElement.Value,
+@@ -204,22 +302,109 @@ public class ParameterSenderService : BackgroundService
+                     weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max),
+                     settings.Min,
+                     settings.Max));
+-            _vrcftQueue.Enqueue(msg);
++            _vrcftQueue.Add(msg);
+         }
+     }
+ 
+     private async Task SendAndClearQueue(CancellationToken cancellationToken)
+     {
+-        if (!_vrcftQueue.IsEmpty)
++        var sendStartTick = Stopwatch.GetTimestamp();
++
++        if (_vrcftQueue.Count > 0)
+         {
+-            await _vrcftModuleSendService.Send(_vrcftQueue.ToArray(), cancellationToken);
++            _vrcftQueue.Add(new OscMessage(VrcftFrameReadyAddress, unchecked(Interlocked.Increment(ref _vrcftFrameSyncSequence))));
++            await _vrcftModuleSendService.Send(_vrcftQueue, cancellationToken);
+             _vrcftQueue.Clear();
+         }
+ 
+-        if (!_dfrQueue.IsEmpty)
++        if (_dfrQueue.Count > 0)
+         {
+-            await _dfrSendService.Send(_dfrQueue.ToArray(), cancellationToken);
++            await _dfrSendService.Send(_dfrQueue, cancellationToken);
+             _dfrQueue.Clear();
+         }
++
++        var producedTick = Interlocked.Exchange(ref _currentExpressionProducedTick, 0);
++        if (producedTick > 0)
++        {
++            var elapsedTicks = sendStartTick - producedTick;
++            RecordOscLatency(elapsedTicks);
++        }
++
++        var frameCapturedTick = Interlocked.Exchange(ref _currentEyeFrameCapturedTick, 0);
++        if (frameCapturedTick > 0)
++        {
++            var elapsedTicks = sendStartTick - frameCapturedTick;
++            RecordCameraToOscLatency(elapsedTicks);
++        }
++
++        LogOscLatency();
++    }
++
++    private void RecordOscLatency(long elapsedTicks)
++    {
++        Interlocked.Add(ref _oscLatencyTicks, elapsedTicks);
++        Interlocked.Increment(ref _oscLatencySamples);
++
++        while (true)
++        {
++            var currentMax = Volatile.Read(ref _oscLatencyMaxTicks);
++            if (elapsedTicks <= currentMax)
++                return;
++
++            if (Interlocked.CompareExchange(ref _oscLatencyMaxTicks, elapsedTicks, currentMax) == currentMax)
++                return;
++        }
++    }
++
++    private void LogOscLatency()
++    {
++        var nowTick = Environment.TickCount64;
++        var lastTick = Interlocked.Read(ref _lastLatencyLogTick);
++        if (nowTick - lastTick < 2000)
++            return;
++
++        Interlocked.Exchange(ref _lastLatencyLogTick, nowTick);
++        var ticks = Interlocked.Exchange(ref _oscLatencyTicks, 0);
++        var samples = Interlocked.Exchange(ref _oscLatencySamples, 0);
++        var maxTicks = Interlocked.Exchange(ref _oscLatencyMaxTicks, 0);
++        var cameraTicks = Interlocked.Exchange(ref _cameraToOscLatencyTicks, 0);
++        var cameraSamples = Interlocked.Exchange(ref _cameraToOscLatencySamples, 0);
++        var cameraMaxTicks = Interlocked.Exchange(ref _cameraToOscLatencyMaxTicks, 0);
++        if (samples <= 0 && cameraSamples <= 0)
++            return;
++
++        _logger.LogInformation(
++            "ParameterSender latency: pipelineToSendMeanMs={PipelineToSendMeanMs:F3} pipelineToSendMaxMs={PipelineToSendMaxMs:F3} pipelineToSendSamples={PipelineToSendSamples} cameraToSendMeanMs={CameraToSendMeanMs:F3} cameraToSendMaxMs={CameraToSendMaxMs:F3} cameraToSendSamples={CameraToSendSamples} useDfr={UseDfr} nativeEyes={NativeEyes}",
++            samples > 0 ? ticks * 1000.0 / Stopwatch.Frequency / samples : 0,
++            maxTicks * 1000.0 / Stopwatch.Frequency,
++            samples,
++            cameraSamples > 0 ? cameraTicks * 1000.0 / Stopwatch.Frequency / cameraSamples : 0,
++            cameraMaxTicks * 1000.0 / Stopwatch.Frequency,
++            cameraSamples,
++            _useDfr,
++            _sendNativeVrcEyeTracking);
++    }
++
++    private void RecordCameraToOscLatency(long elapsedTicks)
++    {
++        Interlocked.Add(ref _cameraToOscLatencyTicks, elapsedTicks);
++        Interlocked.Increment(ref _cameraToOscLatencySamples);
++
++        while (true)
++        {
++            var currentMax = Volatile.Read(ref _cameraToOscLatencyMaxTicks);
++            if (elapsedTicks <= currentMax)
++                return;
++
++            if (Interlocked.CompareExchange(ref _cameraToOscLatencyMaxTicks, elapsedTicks, currentMax) == currentMax)
++                return;
++        }
++    }
++
++    public override void Dispose()
++    {
++        _processingLoopService.ExpressionChangeEvent -= ExpressionUpdateHandler;
++        _pendingExpressionsSignal.Dispose();
++        base.Dispose();
+     }
+ }
+diff --git a/src/Baballonia/Services/ProcessAffinityService.cs b/src/Baballonia/Services/ProcessAffinityService.cs
+new file mode 100644
+index 0000000..b8fe750
+--- /dev/null
++++ b/src/Baballonia/Services/ProcessAffinityService.cs
+@@ -0,0 +1,121 @@
++using Baballonia.Contracts;
++using Microsoft.Extensions.Hosting;
++using Microsoft.Extensions.Logging;
++using System;
++using System.Diagnostics;
++using System.Threading;
++using System.Threading.Tasks;
++
++namespace Baballonia.Services;
++
++public sealed class ProcessAffinityService : BackgroundService
++{
++    private const long DefaultNonPrimaryThreadsMask = 0x3FFC;
++    private static readonly string[] VrcftProcessNames =
++    [
++        "VRCFaceTracking",
++        "VRCFaceTracking.ModuleProcess"
++    ];
++
++    private readonly ILocalSettingsService _localSettingsService;
++    private readonly ILogger<ProcessAffinityService> _logger;
++    private long _lastAppliedSelfMask;
++    private long _lastAppliedVrcftMask;
++
++    public ProcessAffinityService(ILocalSettingsService localSettingsService, ILogger<ProcessAffinityService> logger)
++    {
++        _localSettingsService = localSettingsService;
++        _logger = logger;
++    }
++
++    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        while (!stoppingToken.IsCancellationRequested)
++        {
++            try
++            {
++                ApplyConfiguredAffinity();
++            }
++            catch (Exception ex) when (ex is not OperationCanceledException)
++            {
++                _logger.LogDebug(ex, "Ignoring affinity update failure");
++            }
++
++            await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
++        }
++    }
++
++    private void ApplyConfiguredAffinity()
++    {
++        var selfEnabled = _localSettingsService.ReadSetting("AppSettings_AffinityEnabled", false);
++        var selfMask = NormalizeMask(_localSettingsService.ReadSetting<long>("AppSettings_AffinityMask", 0));
++        if (selfEnabled && selfMask != 0)
++        {
++            using var currentProcess = Process.GetCurrentProcess();
++            ApplyAffinity(currentProcess, selfMask, ref _lastAppliedSelfMask, "Baballonia", disposeProcess: false);
++        }
++
++        var vrcftEnabled = _localSettingsService.ReadSetting("AppSettings_VrcftAffinityEnabled", false);
++        var vrcftMask = NormalizeMask(_localSettingsService.ReadSetting<long>("AppSettings_VrcftAffinityMask", 0));
++        if (!vrcftEnabled || vrcftMask == 0)
++            return;
++
++        foreach (var processName in VrcftProcessNames)
++        {
++            foreach (var process in Process.GetProcessesByName(processName))
++            {
++                ApplyAffinity(process, vrcftMask, ref _lastAppliedVrcftMask, process.ProcessName, disposeProcess: true);
++            }
++        }
++    }
++
++    private long NormalizeMask(long configuredMask)
++    {
++        if (configuredMask != 0)
++            return configuredMask;
++
++        var processorCount = Environment.ProcessorCount;
++        if (processorCount == 16)
++            return DefaultNonPrimaryThreadsMask;
++
++        if (processorCount >= 8)
++        {
++            var reservedThreads = Math.Min(4, processorCount / 2);
++            var startBit = Math.Max(0, processorCount - reservedThreads);
++            long mask = 0;
++            for (var bit = startBit; bit < processorCount; bit++)
++                mask |= 1L << bit;
++            return mask;
++        }
++
++        return 0;
++    }
++
++    private void ApplyAffinity(Process process, long mask, ref long lastAppliedMask, string label, bool disposeProcess)
++    {
++        try
++        {
++            if (process.HasExited)
++                return;
++
++            if (lastAppliedMask == mask && (long)process.ProcessorAffinity == mask)
++                return;
++
++            process.ProcessorAffinity = (IntPtr)mask;
++            lastAppliedMask = mask;
++            _logger.LogInformation("Applied CPU affinity {MaskHex} to {Label} pid={Pid}", $"0x{mask:X}", label, process.Id);
++        }
++        catch (Exception ex)
++        {
++            _logger.LogDebug(ex, "Failed to apply CPU affinity {MaskHex} to {Label}", $"0x{mask:X}", label);
++        }
++        finally
++        {
++            if (disposeProcess)
++                process.Dispose();
++        }
++    }
++}
+diff --git a/src/Baballonia/Services/ProcessingLoopService.cs b/src/Baballonia/Services/ProcessingLoopService.cs
+index bcb8930..48a3dbb 100644
+--- a/src/Baballonia/Services/ProcessingLoopService.cs
++++ b/src/Baballonia/Services/ProcessingLoopService.cs
+@@ -1,16 +1,23 @@
+-﻿using Avalonia.Threading;
+ using Baballonia.Services.events;
+ using Baballonia.Services.Inference;
+ using Microsoft.Extensions.Logging;
+ using System;
++using System.Diagnostics;
++using System.Threading;
++using System.Threading.Tasks;
++using Baballonia;
+ 
+ namespace Baballonia.Services;
+ 
+ public class ProcessingLoopService : IDisposable
+ {
+-    public record struct Expressions(float[]? FaceExpression, float[]? EyeExpression);
++    private static readonly TimeSpan ActiveLoopCadence = TimeSpan.FromMilliseconds(11);
++    private static readonly TimeSpan IdleLoopCadence = TimeSpan.FromMilliseconds(20);
++    private static readonly TimeSpan FrameDrivenWaitTimeout = TimeSpan.FromMilliseconds(20);
+ 
+-    public event Action<Expressions> ExpressionChangeEvent;
++    public record struct Expressions(float[]? FaceExpression, float[]? EyeExpression, long ProducedAtTick = 0, long EyeFrameCapturedAtTick = 0);
++
++    public event Action<Expressions>? ExpressionChangeEvent;
+ 
+     private readonly ILogger<ProcessingLoopService> _logger;
+     private readonly FaceProcessingPipeline _faceProcessingPipeline;
+@@ -19,12 +26,17 @@ public class ProcessingLoopService : IDisposable
+     private readonly EyeProcessingPipeline _eyeProcessingPipeline;
+     private readonly EyePipelineManager _eyePipelineManager;
+     private readonly IEyePipelineEventBus _eyePipelineEventBus;
+-
+-    private readonly DispatcherTimer _drawTimer = new()
+-    {
+-        Interval = TimeSpan.FromMilliseconds(10)
+-    };
+-
++    private readonly CancellationTokenSource _loopCancellationTokenSource = new();
++    private readonly Task _loopTask;
++    private volatile bool _isPaused;
++    private long _timerTickCount;
++    private long _eyeTickCount;
++    private long _eyeSkippedCount;
++    private long _eyeDuplicateFrameSkippedCount;
++    private long _lastWaitedFaceFrameSequence;
++    private long _lastProcessedEyeFrameSequence;
++    private long _lastWaitedEyeFrameSequence;
++    private long _lastStatusLogTick;
+ 
+     public ProcessingLoopService(
+         ILogger<ProcessingLoopService> logger,
+@@ -39,59 +51,223 @@ public class ProcessingLoopService : IDisposable
+         _eyePipelineEventBus = eyePipelineEventBus;
+         _facePipelineManager = facePipelineManager;
+         _eyePipelineManager = eyePipelineManager;
++        _loopTask = Task.Factory.StartNew(() => RunLoopAsync(_loopCancellationTokenSource.Token),
++            _loopCancellationTokenSource.Token,
++            TaskCreationOptions.LongRunning,
++            TaskScheduler.Default).Unwrap();
++    }
++
++    private Task RunLoopAsync(CancellationToken cancellationToken)
++    {
++        try
++        {
++            TryElevateProcessingThreadPriority();
++            while (!cancellationToken.IsCancellationRequested)
++            {
++                if (_isPaused)
++                {
++                    HighResolutionPacer.WaitUntil(Stopwatch.GetTimestamp(), IdleLoopCadence, cancellationToken);
++                    continue;
++                }
++
++                var waitResult = WaitForActiveFrameIfSupported(cancellationToken);
++                if (waitResult == EyeFrameWaitResult.TimedOut)
++                    continue;
++
++                var iterationStart = Stopwatch.GetTimestamp();
++                TimerEvent();
++                if (waitResult == EyeFrameWaitResult.NotUsed)
++                {
++                    var cadence = HasActivePipeline() ? ActiveLoopCadence : IdleLoopCadence;
++                    HighResolutionPacer.WaitUntil(iterationStart, cadence, cancellationToken);
++                }
++            }
++        }
++        catch (OperationCanceledException)
++        {
++            // Normal shutdown.
++        }
++
++        return Task.CompletedTask;
++    }
++
++    private EyeFrameWaitResult WaitForActiveFrameIfSupported(CancellationToken cancellationToken)
++    {
++        var faceWaitResult = WaitForSourceFrameIfSupported(
++            _faceProcessingPipeline.VideoSource,
++            _faceProcessingPipeline.InferenceService != null,
++            ref _lastWaitedFaceFrameSequence,
++            cancellationToken);
++        if (faceWaitResult != EyeFrameWaitResult.NotUsed)
++            return faceWaitResult;
++
++        return WaitForSourceFrameIfSupported(
++            _eyeProcessingPipeline.VideoSource,
++            _eyeProcessingPipeline.InferenceService != null,
++            ref _lastWaitedEyeFrameSequence,
++            cancellationToken);
++    }
++
++    private static EyeFrameWaitResult WaitForSourceFrameIfSupported(
++        IVideoSource? videoSource,
++        bool inferenceActive,
++        ref long lastWaitedFrameSequence,
++        CancellationToken cancellationToken)
++    {
++        if (!inferenceActive || videoSource is not IFrameWaitSource frameWaitSource)
++            return EyeFrameWaitResult.NotUsed;
++
++        var lastSeenSequence = Interlocked.Read(ref lastWaitedFrameSequence);
++        var currentSequence = videoSource.FrameSequence;
++        if (currentSequence > lastSeenSequence)
++        {
++            Interlocked.Exchange(ref lastWaitedFrameSequence, currentSequence);
++            return EyeFrameWaitResult.FrameReady;
++        }
++
++        if (!frameWaitSource.WaitForFrameAfter(lastSeenSequence, FrameDrivenWaitTimeout, cancellationToken))
++            return EyeFrameWaitResult.TimedOut;
++
++        var signaledSequence = videoSource.FrameSequence;
++        if (signaledSequence > 0)
++            Interlocked.Exchange(ref lastWaitedFrameSequence, signaledSequence);
+ 
+-        _drawTimer.Tick += TimerEvent;
+-        _drawTimer.Start();
++        return EyeFrameWaitResult.FrameReady;
+     }
+ 
+-    private void TimerEvent(object? s, EventArgs e)
++    private static void TryElevateProcessingThreadPriority()
+     {
+-        var expressions = new Expressions();
++        if (!OperatingSystem.IsWindows())
++            return;
+ 
+         try
+         {
+-            var faceExpression = _faceProcessingPipeline.RunUpdate();
+-            if (faceExpression != null)
+-                expressions.FaceExpression = faceExpression;
++            Thread.CurrentThread.Priority = ThreadPriority.Normal;
+         }
+-        catch (Exception ex)
++        catch
+         {
+-            _logger.LogError("Unexpected exception in Face Tracking pipeline, stopping... : {}", ex);
+-            _facePipelineManager.StopCamera();
+-            _facePipelineEventBus.Publish(new FacePipelineEvents.ExceptionEvent(ex));
++            // Best-effort only.
+         }
++    }
+ 
+-        try
++    private bool HasActivePipeline()
++    {
++        return (_faceProcessingPipeline.VideoSource != null && _faceProcessingPipeline.InferenceService != null) ||
++               (_eyeProcessingPipeline.VideoSource != null && _eyeProcessingPipeline.InferenceService != null);
++    }
++
++    private void TimerEvent()
++    {
++        Interlocked.Increment(ref _timerTickCount);
++        var expressions = new Expressions(null, null, Stopwatch.GetTimestamp());
++
++        if (_faceProcessingPipeline.VideoSource != null && _faceProcessingPipeline.InferenceService != null)
+         {
+-            var eyeExpression = _eyeProcessingPipeline.RunUpdate();
+-            if (eyeExpression != null)
+-                expressions.EyeExpression = eyeExpression;
++            try
++            {
++                var faceExpression = _faceProcessingPipeline.RunUpdate();
++                if (faceExpression != null)
++                    expressions.FaceExpression = faceExpression;
++            }
++            catch (Exception ex)
++            {
++                _logger.LogError("Unexpected exception in Face Tracking pipeline, stopping... : {}", ex);
++                _facePipelineManager.StopCamera();
++                _facePipelineEventBus.Publish(new FacePipelineEvents.ExceptionEvent(ex));
++            }
+         }
+-        catch (Exception ex)
++
++        if (_eyeProcessingPipeline.VideoSource != null && _eyeProcessingPipeline.InferenceService != null)
++        {
++            Interlocked.Increment(ref _eyeTickCount);
++            try
++            {
++                var frameSequence = _eyeProcessingPipeline.VideoSource.FrameSequence;
++                if (frameSequence > 0 && frameSequence == Interlocked.Read(ref _lastProcessedEyeFrameSequence))
++                {
++                    Interlocked.Increment(ref _eyeDuplicateFrameSkippedCount);
++                    LogLoopStatus();
++                    return;
++                }
++
++                var eyeExpression = _eyeProcessingPipeline.RunUpdate();
++                if (frameSequence > 0)
++                    Interlocked.Exchange(ref _lastProcessedEyeFrameSequence, frameSequence);
++
++                if (eyeExpression != null)
++                {
++                    expressions.EyeExpression = eyeExpression;
++                    expressions.EyeFrameCapturedAtTick = _eyeProcessingPipeline.VideoSource?.LatestFrameTimestampTick ?? 0;
++                }
++            }
++            catch (Exception ex)
++            {
++                _logger.LogError("Unexpected exception in Eye Tracking pipeline, stopping... : {}", ex);
++                _eyePipelineManager.StopAllCameras();
++                _eyePipelineEventBus.Publish(new EyePipelineEvents.ExceptionEvent(ex));
++            }
++        }
++        else
+         {
+-            _logger.LogError("Unexpected exception in Eye Tracking pipeline, stopping... : {}", ex);
+-            _eyePipelineManager.StopAllCameras();
+-            _eyePipelineEventBus.Publish(new EyePipelineEvents.ExceptionEvent(ex));
++            Interlocked.Increment(ref _eyeSkippedCount);
+         }
+ 
+         if (expressions.FaceExpression != null || expressions.EyeExpression != null)
+             ExpressionChangeEvent?.Invoke(expressions);
++
++        LogLoopStatus();
++    }
++
++    private void LogLoopStatus()
++    {
++        var nowTick = Environment.TickCount64;
++        var lastTick = Interlocked.Read(ref _lastStatusLogTick);
++        if (nowTick - lastTick < 2000)
++            return;
++
++        Interlocked.Exchange(ref _lastStatusLogTick, nowTick);
++        _logger.LogInformation(
++            "ProcessingLoop paused={Paused} ticks={Ticks} eyeTicks={EyeTicks} eyeSkipped={EyeSkipped} eyeDuplicateSkipped={EyeDuplicateSkipped} eyeVideoSource={EyeVideoSource} eyeInference={HasEyeInference}",
++            _isPaused,
++            Interlocked.Read(ref _timerTickCount),
++            Interlocked.Read(ref _eyeTickCount),
++            Interlocked.Read(ref _eyeSkippedCount),
++            Interlocked.Read(ref _eyeDuplicateFrameSkippedCount),
++            _eyeProcessingPipeline.VideoSource?.GetType().Name ?? "null",
++            _eyeProcessingPipeline.InferenceService != null);
+     }
+ 
+     public void Start()
+     {
+-        _drawTimer.Start();
++        _isPaused = false;
+     }
+ 
+     public void Pause()
+     {
+-        _drawTimer.Stop();
++        _isPaused = true;
+     }
+ 
+     public void Dispose()
+     {
+-        _drawTimer.Stop();
++        _loopCancellationTokenSource.Cancel();
++        try
++        {
++            _loopTask.Wait(TimeSpan.FromSeconds(2));
++        }
++        catch (AggregateException)
++        {
++            // Ignore loop shutdown exceptions.
++        }
++
++        _loopCancellationTokenSource.Dispose();
+         _faceProcessingPipeline.VideoSource?.Dispose();
+         _eyeProcessingPipeline.VideoSource?.Dispose();
+     }
++
++    private enum EyeFrameWaitResult
++    {
++        NotUsed,
++        FrameReady,
++        TimedOut
++    }
+ }
+diff --git a/src/Baballonia/Services/events/PipelineEvents.cs b/src/Baballonia/Services/events/PipelineEvents.cs
+index a24e60b..dfe9150 100644
+--- a/src/Baballonia/Services/events/PipelineEvents.cs
++++ b/src/Baballonia/Services/events/PipelineEvents.cs
+@@ -21,5 +21,15 @@ public class EyePipelineEvents
+ 
+     public record NewFilteredResultEvent(float[] result);
+ 
++    public record TraceResultEvent(
++        float[] rawResult,
++        float[] filteredResult,
++        float[] processedResult,
++        long frameSequence,
++        long frameCapturedTick,
++        long pipelineCompletedTick,
++        string sourceDescription,
++        string filterMode);
++
+     public record ExceptionEvent(Exception exception);
+ }
+diff --git a/src/Baballonia/Utils/HighResolutionPacer.cs b/src/Baballonia/Utils/HighResolutionPacer.cs
+new file mode 100644
+index 0000000..63be3b7
+--- /dev/null
++++ b/src/Baballonia/Utils/HighResolutionPacer.cs
+@@ -0,0 +1,37 @@
++using System;
++using System.Diagnostics;
++using System.Threading;
++
++namespace Baballonia;
++
++internal static class HighResolutionPacer
++{
++    public static void WaitUntil(long iterationStartTimestamp, TimeSpan cadence, CancellationToken cancellationToken)
++    {
++        if (cadence <= TimeSpan.Zero)
++            return;
++
++        var deadline = iterationStartTimestamp + (long)(cadence.TotalSeconds * Stopwatch.Frequency);
++        while (!cancellationToken.IsCancellationRequested)
++        {
++            var remainingTicks = deadline - Stopwatch.GetTimestamp();
++            if (remainingTicks <= 0)
++                return;
++
++            var remainingMs = remainingTicks * 1000.0 / Stopwatch.Frequency;
++            if (remainingMs > 2.0)
++            {
++                Thread.Sleep(1);
++                continue;
++            }
++
++            if (remainingMs > 0.5)
++            {
++                Thread.Yield();
++                continue;
++            }
++
++            Thread.SpinWait(64);
++        }
++    }
++}
+diff --git a/src/Baballonia/ViewModels/MainViewModel.cs b/src/Baballonia/ViewModels/MainViewModel.cs
+index 952157f..c2959a5 100644
+--- a/src/Baballonia/ViewModels/MainViewModel.cs
++++ b/src/Baballonia/ViewModels/MainViewModel.cs
+@@ -1,5 +1,4 @@
+ ﻿using Avalonia.Controls;
+-using Baballonia.Assets;
+ using Baballonia.Models;
+ using Baballonia.Services;
+ using Baballonia.ViewModels.SplitViewPane;
+@@ -37,22 +36,22 @@ public partial class MainViewModel : ViewModelBase
+ 
+     private readonly List<ListItemTemplate> _desktopTemplates =
+     [
+-        new(typeof(HomePageViewModel), "HomeRegular", Resources.Home_Title_Header), // Home
+-        new(typeof(CalibrationViewModel), "EditRegular", Resources.Calibration_Title_Header), // Calibration
+-        new(typeof(FirmwareViewModel), "DeveloperBoardRegular", Resources.Firmware_Title_Header), // Firmware
+-        new(typeof(VrcViewModel), "CommentRegular", "VRChat"), // VRChat. No translation :P
+-        new(typeof(OutputPageViewModel), "TextFirstLineRegular", Resources.Output_Title_Header), // Output
+-        new(typeof(AppSettingsViewModel), "SettingsRegular", Resources.Settings_Title_Header), // Settings
+-        new(typeof(AboutPageViewModel), "InfoRegular", Resources.About_Title_Header), // About
++        new(typeof(HomePageViewModel), "HomeRegular", "Home"),
++        new(typeof(CalibrationViewModel), "EditRegular", "Calibration"),
++        new(typeof(FirmwareViewModel), "DeveloperBoardRegular", "Firmware"),
++        new(typeof(VrcViewModel), "CommentRegular", "VRChat"),
++        new(typeof(OutputPageViewModel), "TextFirstLineRegular", "Output"),
++        new(typeof(AppSettingsViewModel), "SettingsRegular", "Settings"),
++        new(typeof(AboutPageViewModel), "InfoRegular", "About"),
+     ];
+ 
+     private readonly List<ListItemTemplate> _mobileTemplates =
+     [
+-        new(typeof(HomePageViewModel), "HomeRegular", Resources.Home_Title_Header), // Home
+-        new(typeof(CalibrationViewModel), "EditRegular", Resources.Calibration_Title_Header), // Calibration
+-        new(typeof(OutputPageViewModel), "TextFirstLineRegular", Resources.Output_Title_Header), // Output
+-        new(typeof(AppSettingsViewModel), "SettingsRegular", Resources.Settings_Title_Header), // Settings
+-        new(typeof(AboutPageViewModel), "InfoRegular", Resources.About_Title_Header), // About
++        new(typeof(HomePageViewModel), "HomeRegular", "Home"),
++        new(typeof(CalibrationViewModel), "EditRegular", "Calibration"),
++        new(typeof(OutputPageViewModel), "TextFirstLineRegular", "Output"),
++        new(typeof(AppSettingsViewModel), "SettingsRegular", "Settings"),
++        new(typeof(AboutPageViewModel), "InfoRegular", "About"),
+     ];
+ 
+     public MainViewModel() : this(new WeakReferenceMessenger()) { }
+diff --git a/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs b/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs
+index 2785830..f5cb776 100644
+--- a/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs
++++ b/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs
+@@ -1,20 +1,31 @@
+-using Avalonia;
+-using Avalonia.Media;
+-using Avalonia.Styling;
+-using Baballonia.Assets;
+ using Baballonia.Contracts;
+ using Baballonia.Services;
+ using Baballonia.Services.Inference;
++using Baballonia.Services.Inference.Filters;
+ using CommunityToolkit.Mvvm.ComponentModel;
++using CommunityToolkit.Mvvm.DependencyInjection;
+ using Microsoft.Extensions.Logging;
+ using OscCore;
+ using System;
+-using System.Collections.ObjectModel;
++using System.Collections.Generic;
++using System.Threading.Tasks;
++using Avalonia;
++using Avalonia.Media;
++using Avalonia.Styling;
++using System.Linq;
+ 
+ namespace Baballonia.ViewModels.SplitViewPane;
+ 
+ public partial class AppSettingsViewModel : ViewModelBase
+ {
++    public IOscTarget OscTarget { get; }
++    public GithubService GithubService { get; private set;}
++    public ParameterSenderService ParameterSenderService { get; private set;}
++    private OpenVRService OpenVrService { get; } = Ioc.Default.GetService<OpenVRService>();
++    private ILocalSettingsService SettingsService { get; }
++
++    public string MachineID => _identityService.GetUniqueUserId();
++
+     [ObservableProperty]
+     [property: SavedSetting("AppSettings_RecalibrateAddress", "/avatar/parameters/etvr_recalibrate")]
+     private string _recalibrateAddress;
+@@ -36,6 +47,10 @@ public partial class AppSettingsViewModel : ViewModelBase
+     [property: SavedSetting("AppSettings_OneEuroEnabled", true)]
+     private bool _oneEuroMinEnabled;
+ 
++    [ObservableProperty]
++    [property: SavedSetting("AppSettings_EyeSmoothingFilter", EyeSmoothingModes.SavitzkyGolayFir)]
++    private string _eyeSmoothingFilter;
++
+     [ObservableProperty]
+     [property: SavedSetting("AppSettings_OneEuroMinFreqCutoff", 0.5f)]
+     private float _oneEuroMinFreqCutoff;
+@@ -53,7 +68,7 @@ public partial class AppSettingsViewModel : ViewModelBase
+     private bool _useGPU;
+ 
+     [ObservableProperty]
+-    [property: SavedSetting("AppSettings_SteamVRAutoStart", true)]
++    [property: SavedSetting("AppSettings_SteamvrAutoStart", true)]
+     private bool _steamvrAutoStart;
+ 
+     [ObservableProperty]
+@@ -65,16 +80,9 @@ public partial class AppSettingsViewModel : ViewModelBase
+     private bool _shareEyeData;
+ 
+     [ObservableProperty]
++    [property: SavedSetting("AppSettings_LogLevel", "Debug")]
+     private string _logLevel;
+ 
+-    public ObservableCollection<string> LowestLogLevel { get; } =
+-    [
+-        Resources.Settings_LogLevel_Debug,
+-        Resources.Settings_LogLevel_Information,
+-        Resources.Settings_LogLevel_Warning,
+-        Resources.Settings_LogLevel_Error
+-    ];
+-
+     [ObservableProperty]
+     [property: SavedSetting("AppSettings_AdvancedOptions", false)]
+     private bool _advancedOptions;
+@@ -83,46 +91,63 @@ public partial class AppSettingsViewModel : ViewModelBase
+     [property: SavedSetting("AppSettings_StabilizeEyes", true)]
+     private bool _stabilizeEyes;
+ 
+-    [ObservableProperty] private bool _onboardingEnabled;
++    [ObservableProperty]
++    [property: SavedSetting("AppSettings_CorruptionDetector", CorruptionDetectorModes.StockRow)]
++    private string _corruptionDetector;
+ 
+-    public string MachineID => _identityService.GetUniqueUserId();
++    [ObservableProperty]
++    [property: SavedSetting("AppSettings_BigeyeWindowsBackend", "Stable")]
++    private string _bigeyeWindowsBackend;
+ 
+-    public IOscTarget OscTarget { get; }
++    [ObservableProperty]
++    [property: SavedSetting("AppSettings_RecordEyeTrace", false)]
++    private bool _recordEyeTrace;
++
++    public List<string> LowestLogLevel { get; } =
++    [
++        "Debug",
++        "Information",
++        "Warning",
++        "Error"
++    ];
++
++    public List<string> CorruptionDetectorOptions { get; } = CorruptionDetectorModes.All.ToList();
++    public List<string> BigeyeWindowsBackendOptions { get; } = ["Stable", "Low Latency"];
++    public List<string> EyeSmoothingFilterOptions { get; } = EyeSmoothingModes.All.ToList();
++
++    [ObservableProperty] private bool _onboardingEnabled;
+ 
++    private readonly ILogger<AppSettingsViewModel> _logger;
+     private readonly FacePipelineManager _facePipelineManager;
+     private readonly EyePipelineManager _eyePipelineManager;
+     private readonly IIdentityService _identityService;
+-    private readonly ILogger<AppSettingsViewModel> _logger;
+-    private readonly ILocalSettingsService _localSettingsService;
+-    private readonly OpenVRService _openVrService;
+ 
+     public AppSettingsViewModel(
+         FacePipelineManager facePipelineManager,
+         EyePipelineManager eyePipelineManager,
+-        ILocalSettingsService localSettingsService,
+-        IOscTarget oscTarget,
+         IIdentityService identityService,
+-        GithubService githubService,
+-        ParameterSenderService parameterSenderService,
+-        ILogger<AppSettingsViewModel> logger,
+         IThemeSelectorService themeSelectorService)
+     {
+-        OscTarget = oscTarget;
+-        _localSettingsService = localSettingsService;
+         _facePipelineManager = facePipelineManager;
+         _eyePipelineManager = eyePipelineManager;
+         _identityService = identityService;
+-        _logger = logger;
+-        _localSettingsService.Load(this);
+ 
+-        LogLevel = _localSettingsService.ReadSetting("AppSettings_LogLevel", "Debug");
++        // General/Calibration Settings
++        OscTarget = Ioc.Default.GetService<IOscTarget>()!;
++        GithubService = Ioc.Default.GetService<GithubService>()!;
++        SettingsService = Ioc.Default.GetService<ILocalSettingsService>()!;
++        _logger = Ioc.Default.GetService<ILogger<AppSettingsViewModel>>()!;
++        SettingsService.Load(this);
++        CorruptionDetector = CorruptionDetectorModes.Normalize(CorruptionDetector);
++        BigeyeWindowsBackend = NormalizeBigeyeWindowsBackend(BigeyeWindowsBackend);
++        EyeSmoothingFilter = NormalizeEyeSmoothingFilter(EyeSmoothingFilter, OneEuroMinEnabled);
+ 
+         // Handle edge case where OSC port is used and the system freaks out
+         if (OscTarget.OutPort == 0)
+         {
+             const int port = 8888;
+             OscTarget.OutPort = port;
+-            _localSettingsService.SaveSetting("OSCOutPort", port);
++            SettingsService.SaveSetting("OSCOutPort", port);
+         }
+ 
+         // Edge case: Update the OscPrefix Background color if and only if
+@@ -133,11 +158,14 @@ public partial class AppSettingsViewModel : ViewModelBase
+                 SetOscPrefixBackgroundColor(variant);
+         };
+ 
++        // Risky Settings
++        ParameterSenderService = Ioc.Default.GetService<ParameterSenderService>()!;
++
+         OnboardingEnabled = Utils.IsSupportedDesktopOS;
+ 
+         PropertyChanged += (_, p) =>
+         {
+-            _localSettingsService.Save(this);
++            SettingsService.Save(this);
+             _facePipelineManager.LoadFilter();
+             _eyePipelineManager.LoadFilter();
+ 
+@@ -145,24 +173,63 @@ public partial class AppSettingsViewModel : ViewModelBase
+             {
+                 _eyePipelineManager.LoadEyeStabilization();
+             }
++
++            if (p.PropertyName == nameof(CorruptionDetector))
++            {
++                _eyePipelineManager.LoadCorruptionDetector();
++            }
+         };
+     }
+ 
+-    partial void OnLogLevelChanged(string value)
++    async partial void OnBigeyeWindowsBackendChanged(string value)
+     {
+-        var prev = _localSettingsService.ReadSetting("AppSettings_LogLevel", value);
+-        if (prev == value)
++        var normalized = NormalizeBigeyeWindowsBackend(value);
++        if (normalized != value)
++        {
++            BigeyeWindowsBackend = normalized;
++            return;
++        }
++
++        SettingsService.SaveSetting("AppSettings_BigeyeWindowsBackend", normalized);
++        await _eyePipelineManager.ReloadActiveCamerasAsync();
++    }
++
++    async partial void OnRecordEyeTraceChanged(bool value)
++    {
++        SettingsService.SaveSetting("AppSettings_RecordEyeTrace", value);
++        if (value)
++            await _eyePipelineManager.ReloadActiveCamerasAsync();
++    }
++
++    partial void OnEyeSmoothingFilterChanged(string value)
++    {
++        var normalized = NormalizeEyeSmoothingFilter(value, true);
++        if (normalized != value)
++        {
++            EyeSmoothingFilter = normalized;
+             return;
++        }
+ 
+-        var newLogLevel = value switch
++        OneEuroMinEnabled = normalized != EyeSmoothingModes.Off;
++        SettingsService.SaveSetting("AppSettings_EyeSmoothingFilter", normalized);
++    }
++
++    private static string NormalizeBigeyeWindowsBackend(string? value)
++    {
++        return value?.Trim().ToLowerInvariant() switch
+         {
+-            var v when v == Resources.Settings_LogLevel_Debug => "Debug",
+-            var v when v == Resources.Settings_LogLevel_Information => "Information",
+-            var v when v == Resources.Settings_LogLevel_Warning => "Warning",
+-            var v when v == Resources.Settings_LogLevel_Error => "Error",
+-            _ => "Debug"
++            "low latency" => "Low Latency",
++            "dshow" => "Low Latency",
++            _ => "Stable"
+         };
+-        _localSettingsService.SaveSetting("AppSettings_LogLevel", newLogLevel);
++    }
++
++    private static string NormalizeEyeSmoothingFilter(string? value, bool fallbackEnabled)
++    {
++        if (string.IsNullOrWhiteSpace(value))
++            return fallbackEnabled ? EyeSmoothingModes.SavitzkyGolayFir : EyeSmoothingModes.Off;
++
++        return EyeSmoothingModes.Normalize(value);
+     }
+ 
+     partial void OnOscPrefixChanged(string value)
+@@ -174,7 +241,7 @@ public partial class AppSettingsViewModel : ViewModelBase
+ 
+         if (_isOscPrefixValid)
+         {
+-            _localSettingsService.SaveSetting("AppSettings_OSCPrefix", value);
++            SettingsService.SaveSetting("AppSettings_OSCPrefix", value);
+             SetOscPrefixBackgroundColor(Application.Current!.ActualThemeVariant);
+             return;
+         }
+@@ -195,14 +262,14 @@ public partial class AppSettingsViewModel : ViewModelBase
+ 
+     partial void OnSteamvrAutoStartChanged(bool value)
+     {
+-        var readValue = _localSettingsService.ReadSetting("AppSettings_SteamVRAutoStart", value);
+-        if (readValue == value || _openVrService == null)
++        var readValue = SettingsService.ReadSetting("AppSettings_SteamvrAutoStart", value);
++        if (readValue == value || OpenVrService == null)
+             return;
+ 
+         try
+         {
+-            _openVrService.SteamvrAutoStart = value;
+-            _localSettingsService.SaveSetting("AppSettings_SteamVRAutoStart", value);
++           OpenVrService.SteamvrAutoStart = value;
++           SettingsService.SaveSetting("AppSettings_SteamvrAutoStart", value);
+         }
+         catch (Exception e)
+         {
+@@ -212,15 +279,17 @@ public partial class AppSettingsViewModel : ViewModelBase
+ 
+     async partial void OnUseGPUChanged(bool value)
+     {
+-        var prev = _localSettingsService.ReadSetting("AppSettings_UseGPU", value);
++        var prev = SettingsService.ReadSetting("AppSettings_UseGPU", value);
+         if (prev == value)
+             return;
+ 
+         try
+         {
+-            _localSettingsService.SaveSetting("AppSettings_UseGPU", value);
+-            var loadFace = _eyePipelineManager.LoadInferenceAsync();
+-            var loadEye = _facePipelineManager.LoadInferenceAsync();
++            SettingsService.SaveSetting("AppSettings_UseGPU", value);
++            var loadEye = _eyePipelineManager.LoadInferenceAsync();
++            var loadFace = _facePipelineManager.HasLoadedInference
++                ? _facePipelineManager.LoadInferenceAsync()
++                : Task.CompletedTask;
+ 
+             await loadEye;
+             await loadFace;

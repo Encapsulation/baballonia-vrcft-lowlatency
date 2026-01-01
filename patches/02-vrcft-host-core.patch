@@ -1,0 +1,1889 @@
+﻿diff --git a/Directory.Build.props b/Directory.Build.props
+index b3aaac1..f2f20d0 100644
+--- a/Directory.Build.props
++++ b/Directory.Build.props
+@@ -4,7 +4,7 @@
+     <VftUiTargetFramework>net10.0-windows10.0.22621.0</VftUiTargetFramework>
+     <VftTargetPlatformVersion>10.0.22621.0</VftTargetPlatformVersion>
+     <VftTargetPlatformMinVersion>10.0.17763.0</VftTargetPlatformMinVersion>
+-    <AssemblyVersion>5.4.5.0</AssemblyVersion>
++    <AssemblyVersion>5.4.4.0</AssemblyVersion>
+     <LangVersion>latest</LangVersion>
+     <ImplicitUsings>enable</ImplicitUsings>
+     <Nullable>enable</Nullable>
+diff --git a/VRCFaceTracking.Core/Library/ModuleRuntimeInfo.cs b/VRCFaceTracking.Core/Library/ModuleRuntimeInfo.cs
+index deba55f..aa7e652 100644
+--- a/VRCFaceTracking.Core/Library/ModuleRuntimeInfo.cs
++++ b/VRCFaceTracking.Core/Library/ModuleRuntimeInfo.cs
+@@ -59,15 +59,36 @@ public class ModuleRuntimeInfo
+     /// Whether this module supports expression tracking or not.
+     /// </summary>
+     public bool SupportsExpressionTracking;
++    public bool PrefersPushUpdates;
+ 
+     /// <summary>
+     /// Queue of packets to send
+     /// </summary>
+     public Queue<QueuedPacket> EventBus;
++
++    /// <summary>
++    /// Last time a ReplyUpdate packet was seen from this module.
++    /// </summary>
++    public long LastReplyUpdateTimestamp = Stopwatch.GetTimestamp();
++
++    /// <summary>
++    /// Number of stale watchdog kicks issued for this module.
++    /// </summary>
++    public int StaleKickCount;
++
++    /// <summary>
++    /// Number of restart attempts issued for this module.
++    /// </summary>
++    public int RestartCount;
++
++    /// <summary>
++    /// Whether a restart is already in progress.
++    /// </summary>
++    public int RestartInProgress;
+ }
+ 
+ public struct QueuedPacket
+ {
+     public IpcPacket packet;
+     public int destinationPort;
+-}
+\ No newline at end of file
++}
+diff --git a/VRCFaceTracking.Core/Library/UnifiedLibManager.cs b/VRCFaceTracking.Core/Library/UnifiedLibManager.cs
+index 87417bf..e28755f 100644
+--- a/VRCFaceTracking.Core/Library/UnifiedLibManager.cs
++++ b/VRCFaceTracking.Core/Library/UnifiedLibManager.cs
+@@ -3,6 +3,7 @@ using System.Diagnostics;
+ using System.Reflection;
+ using System.Runtime.InteropServices;
+ using Microsoft.Extensions.Logging;
++using VRCFaceTracking.Core.Services;
+ using VRCFaceTracking.Core.Contracts.Services;
+ using VRCFaceTracking.Core.Sandboxing;
+ using VRCFaceTracking.Core.Sandboxing.IPC;
+@@ -11,6 +12,10 @@ namespace VRCFaceTracking.Core.Library;
+ 
+ public class UnifiedLibManager : ILibManager
+ {
++    private const int SandboxedUpdateCadenceMs = 1;
++    private static readonly TimeSpan PushModuleKickThreshold = TimeSpan.FromMilliseconds(250);
++    private static readonly TimeSpan PushModuleRestartThreshold = TimeSpan.FromMilliseconds(1000);
++    private static readonly TimeSpan PushModuleWatchdogPeriod = TimeSpan.FromMilliseconds(100);
+     #region Logger
+     private readonly ILogger<UnifiedLibManager> _logger;
+     private readonly ILogger _moduleLogger;
+@@ -33,6 +38,10 @@ public class UnifiedLibManager : ILibManager
+     private List<Assembly> AvailableModules { get; set; }
+     private readonly List<ModuleRuntimeInfo> _moduleThreads = new();
+     private readonly IModuleDataService _moduleDataService;
++    private CancellationTokenSource? _sandboxWatchdogCts;
++    private Thread? _sandboxWatchdogThread;
++    private readonly Dictionary<int, int> _replyUpdateCounts = new();
++    private readonly Dictionary<int, long> _replyUpdateLogTimestamps = new();
+ 
+     private string _sandboxProcessPath { get; set; }
+     private List<ModuleRuntimeInfo> AvailableSandboxModules = new ();
+@@ -52,7 +61,10 @@ public class UnifiedLibManager : ILibManager
+         _moduleDataService = moduleDataService;
+ 
+         LoadedModulesMetadata = new ObservableCollection<ModuleMetadataInternal>();
+-        _sandboxProcessPath = Path.GetFullPath(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "VRCFaceTracking.ModuleProcess.exe" : "VRCFaceTracking.ModuleProcess");
++        var sandboxProcessFileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
++            ? "VRCFaceTracking.ModuleProcess.exe"
++            : "VRCFaceTracking.ModuleProcess";
++        _sandboxProcessPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, sandboxProcessFileName));
+         if ( !File.Exists(_sandboxProcessPath) )
+         {
+             // @TODO: Better error handling
+@@ -62,8 +74,230 @@ public class UnifiedLibManager : ILibManager
+         // @TODO: Kill any lingering sub-modules to eliminate any conflicts
+     }
+ 
++    private void StartSandboxWatchdog()
++    {
++        if (_sandboxWatchdogThread?.IsAlive ?? false)
++            return;
++
++        _sandboxWatchdogCts = new CancellationTokenSource();
++        _sandboxWatchdogThread = new Thread(() =>
++        {
++            while (!_sandboxWatchdogCts.IsCancellationRequested)
++            {
++                try
++                {
++                    MonitorSandboxModules();
++                }
++                catch (Exception ex)
++                {
++                    _logger.LogWarning(ex, "Sandbox watchdog iteration failed.");
++                }
++
++                _sandboxWatchdogCts.Token.WaitHandle.WaitOne(PushModuleWatchdogPeriod);
++            }
++        })
++        {
++            IsBackground = true,
++            Name = "VRCFT Sandbox Watchdog"
++        };
++        _sandboxWatchdogThread.Start();
++    }
++
++    private void MonitorSandboxModules()
++    {
++        if (_sandboxServer == null)
++            return;
++
++        PruneExitedSandboxModules();
++
++        List<ModuleRuntimeInfo> snapshot;
++        lock (AvailableSandboxModules)
++        {
++            snapshot = AvailableSandboxModules.ToList();
++        }
++
++        foreach (var module in snapshot)
++        {
++            if (!module.IsActive ||
++                !module.PrefersPushUpdates ||
++                module.SandboxProcessPort <= 0 ||
++                !(module.ModuleInformation?.Active ?? false))
++            {
++                continue;
++            }
++
++            if (!IsSandboxProcessAlive(module))
++            {
++                lock (AvailableSandboxModules)
++                {
++                    AvailableSandboxModules.Remove(module);
++                }
++
++                _logger.LogWarning(
++                    "Removing orphaned sandbox module entry for {module}. pid={pid} port={port}",
++                    module.ModuleInformation?.Name ?? module.ModuleClassName ?? "Unknown",
++                    module.SandboxProcessPID,
++                    module.SandboxProcessPort);
++                continue;
++            }
++
++            var staleFor = Stopwatch.GetElapsedTime(Interlocked.Read(ref module.LastReplyUpdateTimestamp));
++            if (staleFor < PushModuleKickThreshold)
++            {
++                if (Volatile.Read(ref module.StaleKickCount) != 0)
++                    Interlocked.Exchange(ref module.StaleKickCount, 0);
++                continue;
++            }
++
++            if (staleFor >= PushModuleRestartThreshold)
++            {
++                if (Interlocked.CompareExchange(ref module.RestartInProgress, 1, 0) != 0)
++                    continue;
++
++                var restartAttempt = Interlocked.Increment(ref module.RestartCount);
++                var moduleName = module.ModuleInformation?.Name ?? module.ModuleClassName ?? "Unknown";
++                _logger.LogWarning(
++                    "Sandbox module {module} pid={pid} port={port} stopped producing ReplyUpdate packets for {elapsedMs} ms. Restarting module (attempt {attempt}). activeEntries={entryCount}",
++                    moduleName,
++                    module.SandboxProcessPID,
++                    module.SandboxProcessPort,
++                    staleFor.TotalMilliseconds,
++                    restartAttempt,
++                    snapshot.Count);
++
++                ThreadPool.QueueUserWorkItem(_ => RestartSandboxModule(module));
++                continue;
++            }
++
++            var kickCount = Interlocked.Increment(ref module.StaleKickCount);
++            if (kickCount == 1 || kickCount % 20 == 0)
++            {
++                var moduleName = module.ModuleInformation?.Name ?? module.ModuleClassName ?? "Unknown";
++                _logger.LogWarning(
++                    "Sandbox module {module} pid={pid} port={port} has not produced ReplyUpdate packets for {elapsedMs} ms. Sending fallback EventUpdate kick. activeEntries={entryCount}",
++                    moduleName,
++                    module.SandboxProcessPID,
++                    module.SandboxProcessPort,
++                    staleFor.TotalMilliseconds,
++                    snapshot.Count);
++            }
++
++            _sandboxServer.SendData(new EventUpdatePacket(), module.SandboxProcessPort);
++        }
++    }
++
++    private void PruneExitedSandboxModules()
++    {
++        lock (AvailableSandboxModules)
++        {
++            for (var i = AvailableSandboxModules.Count - 1; i >= 0; i--)
++            {
++                var module = AvailableSandboxModules[i];
++                if (module == null || IsSandboxProcessAlive(module))
++                    continue;
++
++                _logger.LogWarning(
++                    "Pruning exited sandbox module entry for {module}. pid={pid} port={port}",
++                    module.ModuleInformation?.Name ?? module.ModuleClassName ?? "Unknown",
++                    module.SandboxProcessPID,
++                    module.SandboxProcessPort);
++                AvailableSandboxModules.RemoveAt(i);
++            }
++        }
++    }
++
++    private static bool IsSandboxProcessAlive(ModuleRuntimeInfo module)
++    {
++        try
++        {
++            if (module?.Process == null)
++                return false;
++
++            module.Process.Refresh();
++            return !module.Process.HasExited;
++        }
++        catch
++        {
++            return false;
++        }
++    }
++
++    private void RestartSandboxModule(ModuleRuntimeInfo module)
++    {
++        try
++        {
++            var modulePath = module.SandboxModulePath;
++            var moduleName = module.ModuleInformation?.Name ?? module.ModuleClassName ?? "Unknown";
++
++            var teardownSuccess = false;
++            try
++            {
++                teardownSuccess = TeardownModuleSandboxed(module, gracefulRequest: false);
++            }
++            catch (Exception ex)
++            {
++                _logger.LogWarning(ex, "Failed tearing down stale sandbox module {module}.", moduleName);
++            }
++
++            KillAllSandboxProcesses();
++
++            lock (AvailableSandboxModules)
++            {
++                AvailableSandboxModules.Remove(module);
++            }
++
++            _dispatcherService.Run(() =>
++            {
++                for (var i = LoadedModulesMetadata.Count - 1; i >= 0; i--)
++                {
++                    if (LoadedModulesMetadata[i].Name == moduleName)
++                        LoadedModulesMetadata.RemoveAt(i);
++                }
++            });
++
++            if (!teardownSuccess)
++                _logger.LogWarning("Sandbox module {module} did not tear down cleanly before restart.", moduleName);
++
++            InitialiseSandboxesBaseOnPaths([modulePath]);
++        }
++        finally
++        {
++            Interlocked.Exchange(ref module.LastReplyUpdateTimestamp, Stopwatch.GetTimestamp());
++            Interlocked.Exchange(ref module.StaleKickCount, 0);
++            Interlocked.Exchange(ref module.RestartInProgress, 0);
++        }
++    }
++
++    private void KillAllSandboxProcesses()
++    {
++        try
++        {
++            foreach (var proc in Process.GetProcessesByName("VRCFaceTracking.ModuleProcess"))
++            {
++                try
++                {
++                    if (!proc.HasExited)
++                    {
++                        _logger.LogWarning("Killing lingering sandbox process {pid}.", proc.Id);
++                        proc.Kill(entireProcessTree: true);
++                        proc.WaitForExit(2000);
++                    }
++                }
++                catch (Exception ex)
++                {
++                    _logger.LogWarning(ex, "Failed killing lingering sandbox process {pid}.", proc.Id);
++                }
++            }
++        }
++        catch (Exception ex)
++        {
++            _logger.LogWarning(ex, "Failed searching for lingering sandbox processes.");
++        }
++    }
++
+     public void Initialize()
+     {
++        StartSandboxWatchdog();
+         LoadedModulesMetadata.Clear();
+         LoadedModulesMetadata.Add(new ModuleMetadataInternal
+         { 
+@@ -179,6 +413,10 @@ public class UnifiedLibManager : ILibManager
+                             // Update support variables
+                             AvailableSandboxModules[moduleIndex].SupportsEyeTracking        = AvailableSandboxModules[moduleIndex].SupportsEyeTracking && replyInitPacket.eyeSuccess;
+                             AvailableSandboxModules[moduleIndex].SupportsExpressionTracking = AvailableSandboxModules[moduleIndex].SupportsExpressionTracking && replyInitPacket.expressionSuccess;
++                            AvailableSandboxModules[moduleIndex].PrefersPushUpdates         = replyInitPacket.prefersPushUpdates;
++                            Interlocked.Exchange(ref AvailableSandboxModules[moduleIndex].LastReplyUpdateTimestamp, Stopwatch.GetTimestamp());
++                            Interlocked.Exchange(ref AvailableSandboxModules[moduleIndex].StaleKickCount, 0);
++                            Interlocked.Exchange(ref AvailableSandboxModules[moduleIndex].RestartInProgress, 0);
+ 
+                             _logger.LogInformation("Got init for module {module}. Eye: {eye} Expr: {expr}...",
+                                 AvailableSandboxModules[moduleIndex].ModuleClassName,
+@@ -208,7 +446,8 @@ public class UnifiedLibManager : ILibManager
+                             AvailableSandboxModules[moduleIndex].ModuleInformation.UsingEye         = !AvailableSandboxModules.Any(m => m.ModuleInformation.UsingEye) && replyInitPacket.eyeSuccess;
+                             AvailableSandboxModules[moduleIndex].ModuleInformation.UsingExpression  = !AvailableSandboxModules.Any(m => m.ModuleInformation.UsingExpression) && replyInitPacket.expressionSuccess;
+                             AvailableSandboxModules[moduleIndex].ModuleInformation.StaticImages     = replyInitPacket.IconDataStreams;
+-                            EnsureModuleThreadStartedSandboxed(AvailableSandboxModules[moduleIndex]);
++                            if (!replyInitPacket.prefersPushUpdates)
++                                EnsureModuleThreadStartedSandboxed(AvailableSandboxModules[moduleIndex]);
+ 
+                             _dispatcherService.Run(() => {
+ 
+@@ -268,6 +507,38 @@ public class UnifiedLibManager : ILibManager
+                     case IpcPacket.PacketType.ReplyUpdate:
+                         {
+                             ReplyUpdatePacket replyUpdatePacket = (ReplyUpdatePacket) packet;
++                            Interlocked.Exchange(ref AvailableSandboxModules[moduleIndex].LastReplyUpdateTimestamp, Stopwatch.GetTimestamp());
++                            Interlocked.Exchange(ref AvailableSandboxModules[moduleIndex].StaleKickCount, 0);
++                            var replyCount = _replyUpdateCounts.TryGetValue(moduleIndex, out var existingReplyCount)
++                                ? existingReplyCount + 1
++                                : 1;
++                            _replyUpdateCounts[moduleIndex] = replyCount;
++                            if (!_replyUpdateLogTimestamps.TryGetValue(moduleIndex, out var lastReplyLogTs))
++                            {
++                                _replyUpdateLogTimestamps[moduleIndex] = Stopwatch.GetTimestamp();
++                                _logger.LogInformation(
++                                    "ReplyUpdate flow started for {module}. pid={pid} port={port} count={count} status={status} usingEye={usingEye} usingExpr={usingExpr}",
++                                    AvailableSandboxModules[moduleIndex].ModuleInformation?.Name ?? AvailableSandboxModules[moduleIndex].ModuleClassName ?? "Unknown",
++                                    AvailableSandboxModules[moduleIndex].SandboxProcessPID,
++                                    AvailableSandboxModules[moduleIndex].SandboxProcessPort,
++                                    replyCount,
++                                    AvailableSandboxModules[moduleIndex].Status,
++                                    AvailableSandboxModules[moduleIndex].ModuleInformation?.UsingEye,
++                                    AvailableSandboxModules[moduleIndex].ModuleInformation?.UsingExpression);
++                            }
++                            else if (Stopwatch.GetElapsedTime(lastReplyLogTs) >= TimeSpan.FromSeconds(5))
++                            {
++                                _replyUpdateLogTimestamps[moduleIndex] = Stopwatch.GetTimestamp();
++                                _logger.LogInformation(
++                                    "ReplyUpdate stats for {module}: pid={pid} port={port} count={count} status={status} usingEye={usingEye} usingExpr={usingExpr}",
++                                    AvailableSandboxModules[moduleIndex].ModuleInformation?.Name ?? AvailableSandboxModules[moduleIndex].ModuleClassName ?? "Unknown",
++                                    AvailableSandboxModules[moduleIndex].SandboxProcessPID,
++                                    AvailableSandboxModules[moduleIndex].SandboxProcessPort,
++                                    replyCount,
++                                    AvailableSandboxModules[moduleIndex].Status,
++                                    AvailableSandboxModules[moduleIndex].ModuleInformation?.UsingEye,
++                                    AvailableSandboxModules[moduleIndex].ModuleInformation?.UsingExpression);
++                            }
+ 
+                             if ( AvailableSandboxModules[moduleIndex].Status == ModuleState.Active && AvailableSandboxModules[moduleIndex].ModuleInformation.Active )
+                             {
+@@ -280,6 +551,7 @@ public class UnifiedLibManager : ILibManager
+                                     replyUpdatePacket.UpdateGlobalExpressionState();
+                                 }
+                                 replyUpdatePacket.UpdateHeadState();
++                                ParameterSenderService.SignalPendingUpdate();
+                             }
+ 
+                             break;
+@@ -333,7 +605,7 @@ public class UnifiedLibManager : ILibManager
+             {
+                 // Start subprocess
+                 var sandboxProcess  = Process.Start(new ProcessStartInfo(
+-                    _sandboxProcessPath, $"--port {_sandboxServer.Port} --module-path \"{dll}\" --parent-pid {Environment.ProcessId}"
++                    _sandboxProcessPath, $"--port {_sandboxServer.Port} --module-path \"{dll}\""
+                 )
+                 {
+ #if !DEBUG
+@@ -403,7 +675,7 @@ public class UnifiedLibManager : ILibManager
+             var updatePacket = new EventUpdatePacket();
+             while (!cts.IsCancellationRequested)
+             {
+-                Thread.Sleep(10); // Wait 10ms => 100Hz
++                Thread.Sleep(SandboxedUpdateCadenceMs);
+                 _sandboxServer.SendData(updatePacket, port);
+             }
+             _logger.LogDebug("Thread for {module} ended", module.GetType().Name);
+@@ -437,32 +709,50 @@ public class UnifiedLibManager : ILibManager
+         }
+     }
+ 
+-    private bool TeardownModuleSandboxed(ModuleRuntimeInfo module)
++    private bool TeardownModuleSandboxed(ModuleRuntimeInfo module, bool gracefulRequest = true)
+     {
+         _logger.LogInformation("Tearing down {module} ", module.ModuleClassName);
+ 
+-        // Send a message to the module sub-process
+-        var eventTeardownPacket = new EventTeardownPacket();
+-        _sandboxServer.SendData(eventTeardownPacket, module.SandboxProcessPort);
++        ReleaseModuleTrackingClaims(module);
++
++        if (gracefulRequest)
++        {
++            // Send a message to the module sub-process
++            var eventTeardownPacket = new EventTeardownPacket();
++            try
++            {
++                _sandboxServer.SendData(eventTeardownPacket, module.SandboxProcessPort);
++            }
++            catch (Exception ex)
++            {
++                _logger.LogWarning(ex, "Failed sending teardown packet to sandbox module {module}. Forcing process shutdown.", module.ModuleClassName);
++            }
++        }
+ 
+         // Kill the update thread
+         module.UpdateCancellationToken?.Cancel();
+         // Give the module 100ms to kill itself
+         Thread.Sleep(100);
+ 
++        if (module.Process == null)
++            return true;
++
+         // Only bother tearing down a module if it's actually shutdown
+-        if ( !(module.Process?.HasExited ?? true) )
++        try
+         {
+-            _logger.LogDebug("Module process has not yet exited");
+-            try  {
+-                if (!(module.Process?.WaitForExit(200) ?? false))
++            module.Process.Refresh();
++            if (!module.Process.HasExited)
++            {
++                _logger.LogDebug("Module process has not yet exited");
++                if (!module.Process.WaitForExit(200))
+                 {
+-                    _logger.LogDebug("Module {id} didn't exit gracefully. Forcing kill...", module.Process?.Id ?? -1);
+-                    module.Process?.Kill(entireProcessTree: true);
+-                    if (!(module.Process?.WaitForExit(2000) ?? false))
++                    _logger.LogDebug("Module {id} didn't exit gracefully. Forcing kill...", module.Process.Id);
++                    module.Process.Kill(entireProcessTree: true);
++                    if (!module.Process.WaitForExit(2000))
+                     {
+                         // on windows we can use taskkill /F /T /PID {procId} to force kill a process very aggressively. this has a higher success rate than process.kill!
+-                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
++                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
++                        {
+                             using var killer = Process.Start(new ProcessStartInfo
+                             {
+                                 FileName = "taskkill",
+@@ -471,20 +761,29 @@ public class UnifiedLibManager : ILibManager
+                                 UseShellExecute = false
+                             });
+                             killer?.WaitForExit(2000);
+-                        } else {
++                        }
++                        else
++                        {
+                             _logger.LogCritical("Process {id} is a zombie or stuck in Kernel I/O. Manual intervention required.", module.Process.Id);
+                         }
+-                        return false; 
++
++                        module.Process.Refresh();
++                        if (!module.Process.HasExited)
++                            return false;
+                     }
+                 }
+-            } catch ( System.ComponentModel.Win32Exception ex ) {
+-                // Can fail to call OpenProcessEx due to some error such as ACCESS_DENIED (process has higher priveleges, eg Sraniple)
+-                _logger.LogError($"Tried killing process with PID {module.Process.Id}. Got win32 error ({ex.ToString()}");
+-            } catch ( Exception ex ) {
+-                // Tell the user why we got an exception so that we can hopefully fix it.
+-                _logger.LogError($"Tried killing process with PID {module.Process.Id}. Got exception ({ex.HResult}) {ex.Message}");
+             }
+         }
++        catch (System.ComponentModel.Win32Exception ex)
++        {
++            _logger.LogError(ex, "Tried killing process with PID {pid}.", module.Process.Id);
++            return false;
++        }
++        catch (Exception ex)
++        {
++            _logger.LogError(ex, "Tried killing process with PID {pid}.", module.Process.Id);
++            return false;
++        }
+ 
+         if (module.UpdateThread?.IsAlive ?? false)
+         {
+@@ -497,6 +796,35 @@ public class UnifiedLibManager : ILibManager
+         return true;
+     }
+ 
++    private void ReleaseModuleTrackingClaims(ModuleRuntimeInfo module)
++    {
++        var hadEye = module.ModuleInformation?.UsingEye == true;
++        var hadExpression = module.ModuleInformation?.UsingExpression == true;
++
++        if (hadEye)
++            EyeStatus = ModuleState.Uninitialized;
++
++        if (hadExpression)
++            ExpressionStatus = ModuleState.Uninitialized;
++
++        if (module.ModuleInformation != null)
++        {
++            module.ModuleInformation.Active = false;
++            module.ModuleInformation.UsingEye = false;
++            module.ModuleInformation.UsingExpression = false;
++        }
++
++        module.Status = ModuleState.Uninitialized;
++        module.IsActive = false;
++
++        if (module.UpdateThread != null || module.UpdateCancellationToken != null)
++        {
++            _moduleThreads.RemoveAll(pair =>
++                pair.SandboxProcessPID == module.SandboxProcessPID &&
++                pair.SandboxProcessPort == module.SandboxProcessPort);
++        }
++    }
++
+     // Signal all active modules to gracefully shut down their respective runtimes
+     public void TeardownAllAndResetAsync()
+     {
+@@ -546,4 +874,4 @@ public class UnifiedLibManager : ILibManager
+         EyeStatus = ModuleState.Uninitialized;
+         ExpressionStatus = ModuleState.Uninitialized;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/VRCFaceTracking.Core/MainStandalone.cs b/VRCFaceTracking.Core/MainStandalone.cs
+index bd3e990..4576c0e 100644
+--- a/VRCFaceTracking.Core/MainStandalone.cs
++++ b/VRCFaceTracking.Core/MainStandalone.cs
+@@ -1,4 +1,5 @@
+-﻿using System.Runtime.CompilerServices;
++using System.Diagnostics;
++using System.Runtime.CompilerServices;
+ using Microsoft.Extensions.Logging;
+ using VRCFaceTracking.Core.Contracts.Services;
+ using VRCFaceTracking.Core.Library;
+@@ -27,6 +28,7 @@ public class MainStandalone : IMainService
+         _logger = logger;
+         _libManager = libManager;
+         _mutator = mutator;
++        TryNormalizeProcessPriority();
+     }
+ 
+     public async Task Teardown()
+@@ -78,4 +80,21 @@ public class MainStandalone : IMainService
+ 
+         return Task.CompletedTask;
+     }
++
++    private void TryNormalizeProcessPriority()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        try
++        {
++            using var currentProcess = Process.GetCurrentProcess();
++            currentProcess.PriorityClass = ProcessPriorityClass.Normal;
++            _logger.LogDebug("Set VRCFT process priority to {PriorityClass}", currentProcess.PriorityClass);
++        }
++        catch (Exception ex)
++        {
++            _logger.LogDebug(ex, "Failed to normalize VRCFT process priority");
++        }
++    }
+ }
+diff --git a/VRCFaceTracking.Core/OSC/OSCMessage.cs b/VRCFaceTracking.Core/OSC/OSCMessage.cs
+index 92c2f47..b28f667 100644
+--- a/VRCFaceTracking.Core/OSC/OSCMessage.cs
++++ b/VRCFaceTracking.Core/OSC/OSCMessage.cs
+@@ -108,7 +108,11 @@ public class OscMessage
+     /// <param name="buffer">Target byte buffer to serialize to, starting from index 0</param>
+     /// <param name="ct">Cancellation Token</param>
+     /// <returns>Length of serialized data</returns>
+-    public async Task<int> Encode(byte[] buffer, CancellationToken ct) => await Task.Run(() => fti_osc.create_osc_message(buffer, ref _meta), ct);
++    public Task<int> Encode(byte[] buffer, CancellationToken ct)
++    {
++        ct.ThrowIfCancellationRequested();
++        return Task.FromResult(fti_osc.create_osc_message(buffer, ref _meta));
++    }
+ 
+     public OscMessage(OscMessageMeta meta) => _meta = meta;
+     
+@@ -120,4 +124,4 @@ public class OscMessage
+             fti_osc.free_osc_message(_metaPtr);
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyInitPacket.cs b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyInitPacket.cs
+index 7c96d58..cb63a84 100644
+--- a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyInitPacket.cs
++++ b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyInitPacket.cs
+@@ -11,6 +11,7 @@ public class ReplyInitPacket : IpcPacket
+ {
+     public bool eyeSuccess                  = false;
+     public bool expressionSuccess           = false;
++    public bool prefersPushUpdates          = false;
+     public string ModuleInformationName     = "";
+     public List<Stream> IconDataStreams     = new ();
+ 
+@@ -23,6 +24,7 @@ public class ReplyInitPacket : IpcPacket
+ 
+         int packedData  = eyeSuccess ? 1 : 0;
+         packedData = packedData | ( expressionSuccess ? 2 : 0 );
++        packedData = packedData | ( prefersPushUpdates ? 4 : 0 );
+ 
+         byte[] moduleInfoStringData = Encoding.UTF8.GetBytes(ModuleInformationName);
+         byte[] moduleInfoSizeBytes  = BitConverter.GetBytes(moduleInfoStringData.Length);
+@@ -78,6 +80,7 @@ public class ReplyInitPacket : IpcPacket
+         byte packedData = data[8];
+         this.eyeSuccess = ( packedData & 1 ) == 1;
+         this.expressionSuccess = ( packedData & 2 ) == 2;
++        this.prefersPushUpdates = (packedData & 4) == 4;
+ 
+         int moduleInfoStringLength  = BitConverter.ToInt32(data, 9);
+         ModuleInformationName       = Encoding.UTF8.GetString(data, 13, moduleInfoStringLength);
+diff --git a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
+index 0a4a678..0ac3aff 100644
+--- a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
++++ b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
+@@ -1,9 +1,5 @@
+ ﻿using System;
+-using System.Collections.Generic;
+-using System.Linq;
+-using System.Runtime.InteropServices;
+-using System.Text;
+-using System.Threading.Tasks;
++using System.Buffers.Binary;
+ using VRCFaceTracking.Core.Params.Data;
+ using VRCFaceTracking.Core.Params.Expressions;
+ 
+@@ -13,7 +9,14 @@ public class ReplyUpdatePacket : IpcPacket
+     const int EXPRESSION_COUNT = (int)UnifiedExpressions.Max + 1;
+     const float INVALID_FLOAT = 0xFFFFFFFF;
+ 
+-    [StructLayout(LayoutKind.Sequential)]
++    private const int ScalarFloatCount = 16;
++    private const int PayloadFloatCount = ScalarFloatCount + EXPRESSION_COUNT;
++
++    private UpdateDataContiguous _contiguousUnifiedData = new ()
++    {
++        Expression_Shapes = new float[EXPRESSION_COUNT]
++    };
++
+     internal class UpdateDataContiguous
+     {
+         internal float Eye_MaxDilation;
+@@ -37,15 +40,9 @@ public class ReplyUpdatePacket : IpcPacket
+         internal float Head_PosY;
+         internal float Head_PosZ;
+ 
+-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = EXPRESSION_COUNT)]
+         internal float[] Expression_Shapes;
+     }
+ 
+-    private UpdateDataContiguous _contiguousUnifiedData = new ()
+-    {
+-        Expression_Shapes = new float[EXPRESSION_COUNT]
+-    };
+-
+     public override PacketType GetPacketType() => PacketType.ReplyUpdate;
+ 
+     // We send a challenge to the vrcft host, and if we receive a reply with the same data, we consider the connection successfully ACKed.
+@@ -54,9 +51,8 @@ public class ReplyUpdatePacket : IpcPacket
+     {
+         // Build handshake packet
+ 
+-        byte[] packetTypeBytes = BitConverter.GetBytes((uint)GetPacketType());
+-
+-        int packetSize = SIZE_PACKET_MAGIC + SIZE_PACKET_TYPE;
++        var payloadSize = PayloadFloatCount * sizeof(float);
++        var packetSize = SIZE_PACKET_MAGIC + SIZE_PACKET_TYPE + sizeof(int) + payloadSize;
+ 
+         // Update the internal data structure to match the current state of unified tracking
+         _contiguousUnifiedData.Eye_Left_GazeX               = UnifiedTracking.Data.Eye.Left.Gaze.x;
+@@ -72,9 +68,9 @@ public class ReplyUpdatePacket : IpcPacket
+         _contiguousUnifiedData.Eye_MaxDilation              = UnifiedTracking.Data.Eye._maxDilation;
+         _contiguousUnifiedData.Eye_MinDilation              = UnifiedTracking.Data.Eye._minDilation;
+ 
+-        _contiguousUnifiedData.Head_Yaw                     = UnifiedTracking.Data.Head.HeadYaw;
+-        _contiguousUnifiedData.Head_Pitch                   = UnifiedTracking.Data.Head.HeadPitch;
+-        _contiguousUnifiedData.Head_Roll                    = UnifiedTracking.Data.Head.HeadRoll;
++        _contiguousUnifiedData.Head_Yaw                     = UnifiedTracking.Data.Head.HeadPitch;
++        _contiguousUnifiedData.Head_Pitch                   = UnifiedTracking.Data.Head.HeadRoll;
++        _contiguousUnifiedData.Head_Roll                    = UnifiedTracking.Data.Head.HeadYaw;
+ 
+         _contiguousUnifiedData.Head_PosX                    = UnifiedTracking.Data.Head.HeadPosX;
+         _contiguousUnifiedData.Head_PosY                    = UnifiedTracking.Data.Head.HeadPosY;
+@@ -86,49 +82,58 @@ public class ReplyUpdatePacket : IpcPacket
+             _contiguousUnifiedData.Expression_Shapes[i] = UnifiedTracking.Data.Shapes[i].Weight;
+         }
+ 
+-        // Convert _contiguousUnifiedData to bytes
+-        int sizeStruct = Marshal.SizeOf<UpdateDataContiguous>();
+-        byte[] sizeStructBytes = BitConverter.GetBytes(sizeStruct);
+-        byte[] arr = new byte[sizeStruct];
+-
+-        var ptr = IntPtr.Zero;
+-        try
+-        {
+-            ptr = Marshal.AllocHGlobal(sizeStruct);
+-            Marshal.StructureToPtr(_contiguousUnifiedData, ptr, false);
+-            Marshal.Copy(ptr, arr, 0, sizeStruct);
+-        }
+-        finally
++        byte[] finalDataStream = new byte[packetSize];
++        Buffer.BlockCopy(HANDSHAKE_MAGIC, 0, finalDataStream, 0, SIZE_PACKET_MAGIC);
++        BinaryPrimitives.WriteUInt32LittleEndian(finalDataStream.AsSpan(4, sizeof(uint)), (uint)GetPacketType());
++        BinaryPrimitives.WriteInt32LittleEndian(finalDataStream.AsSpan(8, sizeof(int)), payloadSize);
++
++        var offset = 12;
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_MaxDilation);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_MinDilation);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Left_GazeX);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Left_GazeY);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Left_PupilDiameter_MM);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Left_Openness);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Right_GazeX);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Right_GazeY);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Right_PupilDiameter_MM);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Eye_Right_Openness);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Head_Yaw);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Head_Pitch);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Head_Roll);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Head_PosX);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Head_PosY);
++        WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Head_PosZ);
++        for (int i = 0; i < _contiguousUnifiedData.Expression_Shapes.Length; i++)
+         {
+-            Marshal.FreeHGlobal(ptr);
++            WriteFloat(finalDataStream, ref offset, _contiguousUnifiedData.Expression_Shapes[i]);
+         }
+ 
+-        packetSize = packetSize + sizeof(int) + sizeStruct;
+-
+-        // Prepare buffer
+-        byte[] finalDataStream = new byte[packetSize];
+-        Buffer.BlockCopy(HANDSHAKE_MAGIC,   0, finalDataStream, 0,  SIZE_PACKET_MAGIC);     // Magic
+-        Buffer.BlockCopy(packetTypeBytes,   0, finalDataStream, 4,  SIZE_PACKET_TYPE);      // Packet Type
+-        Buffer.BlockCopy(sizeStructBytes,   0, finalDataStream, 8,  sizeof(int));           // Struct.Length
+-        Buffer.BlockCopy(arr,               0, finalDataStream, 12, sizeStruct);            // Data
+-
+         return finalDataStream;
+     }
+ 
+     public override void Decode(in byte[] data)
+     {
+-        int structSize = BitConverter.ToInt32(data, 8);
+-        
+-        var ptr = IntPtr.Zero;
+-        try
+-        {
+-            ptr = Marshal.AllocHGlobal(structSize);
+-            Marshal.Copy(data, 12, ptr, structSize);
+-            Marshal.PtrToStructure<UpdateDataContiguous>(ptr, _contiguousUnifiedData);
+-        }
+-        finally
++        var offset = 12;
++        _contiguousUnifiedData.Eye_MaxDilation = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_MinDilation = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Left_GazeX = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Left_GazeY = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Left_PupilDiameter_MM = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Left_Openness = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Right_GazeX = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Right_GazeY = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Right_PupilDiameter_MM = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Eye_Right_Openness = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Head_Yaw = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Head_Pitch = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Head_Roll = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Head_PosX = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Head_PosY = ReadFloat(data, ref offset);
++        _contiguousUnifiedData.Head_PosZ = ReadFloat(data, ref offset);
++        for (int i = 0; i < _contiguousUnifiedData.Expression_Shapes.Length; i++)
+         {
+-            Marshal.FreeHGlobal(ptr);
++            _contiguousUnifiedData.Expression_Shapes[i] = ReadFloat(data, ref offset);
+         }
+     }
+ 
+@@ -202,4 +207,17 @@ public class ReplyUpdatePacket : IpcPacket
+                 UnifiedTracking.Data.Shapes[i].Weight = _contiguousUnifiedData.Expression_Shapes[i];
+         }
+     }
++
++    private static void WriteFloat(byte[] buffer, ref int offset, float value)
++    {
++        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset, sizeof(float)), BitConverter.SingleToUInt32Bits(value));
++        offset += sizeof(float);
++    }
++
++    private static float ReadFloat(byte[] buffer, ref int offset)
++    {
++        var value = BitConverter.UInt32BitsToSingle(BinaryPrimitives.ReadUInt32LittleEndian(buffer.AsSpan(offset, sizeof(float))));
++        offset += sizeof(float);
++        return value;
++    }
+ }
+diff --git a/VRCFaceTracking.Core/Sandboxing/VrcftSandboxClient.cs b/VRCFaceTracking.Core/Sandboxing/VrcftSandboxClient.cs
+index 9bece08..c177d41 100644
+--- a/VRCFaceTracking.Core/Sandboxing/VrcftSandboxClient.cs
++++ b/VRCFaceTracking.Core/Sandboxing/VrcftSandboxClient.cs
+@@ -7,10 +7,12 @@ using System.Net;
+ using System.Runtime.InteropServices;
+ using System.Security.Principal;
+ using System.Text;
++using System.Threading;
+ using System.Threading.Tasks;
+ using VRCFaceTracking.Core.Models;
+ using VRCFaceTracking.Core.Sandboxing.IPC;
+ using Microsoft.Extensions.Logging;
++using System.Diagnostics;
+ 
+ namespace VRCFaceTracking.Core.Sandboxing;
+ 
+@@ -18,12 +20,18 @@ public delegate void OnPacketReceivedCallback(in IpcPacket packet);
+ 
+ public class VrcftSandboxClient : UdpFullDuplex
+ {
++    private static readonly TimeSpan HandshakeRetryTimeout = TimeSpan.FromMilliseconds(250);
+     // private int                                     _port = 0;
+     private IPEndPoint                              _serverEndpoint;
+     private readonly ILoggerFactory                 _loggerFactory;
+     private readonly ILogger<VrcftSandboxClient>    _logger;
+     private bool                                    _isConnected;
+     private int                                     _maxPacketSizeBytes;
++    private string?                                 _modulePath;
++    private int                                     _reconnectInProgress;
++    private int                                     _handshakePending;
++    private long                                    _lastHandshakeSendTimestamp;
++    public bool IsConnected => _isConnected;
+ 
+     public OnPacketReceivedCallback OnPacketReceivedCallback = null;
+     public VrcftSandboxClient(int portNumber,
+@@ -50,10 +58,20 @@ public class VrcftSandboxClient : UdpFullDuplex
+ 
+     public void Connect(in string modulePath)
+     {
++        _modulePath = modulePath;
++        if (!TryBeginHandshake("connect"))
++            return;
++
+         var handshakePkt = new HandshakePacket();
+         handshakePkt.ModulePath = modulePath;
+         _logger.LogInformation($"Attempting to connect to server...");
+-        SendData(handshakePkt, _serverEndpoint);
++        if (!TrySendBytes(handshakePkt.GetBytes()))
++        {
++            Interlocked.Exchange(ref _handshakePending, 0);
++            return;
++        }
++        Interlocked.Exchange(ref _lastHandshakeSendTimestamp, Stopwatch.GetTimestamp());
++
+         // Take the lower bound of packet rate we can fit through the network
+         _maxPacketSizeBytes = Math.Min(_receivingUdpClient.Client.ReceiveBufferSize, _receivingUdpClient.Client.SendBufferSize);
+     }
+@@ -89,17 +107,87 @@ public class VrcftSandboxClient : UdpFullDuplex
+                 {
+                     _logger.LogInformation($"Received ACK from host on port {endpoint.Port}. Handshake done.");
+                     _isConnected = true;
++                    Interlocked.Exchange(ref _handshakePending, 0);
+                     SendAllPendingPackets();
+                 }
+             }
+         }
+     }
+ 
+-    private void SendData(in byte[] message)
++    private bool TryBeginHandshake(string reason)
++    {
++        if (Interlocked.CompareExchange(ref _handshakePending, 1, 0) == 0)
++            return true;
++
++        var staleFor = Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastHandshakeSendTimestamp));
++        if (staleFor < HandshakeRetryTimeout)
++            return false;
++
++        Interlocked.Exchange(ref _handshakePending, 0);
++        return Interlocked.CompareExchange(ref _handshakePending, 1, 0) == 0;
++    }
++
++    private bool TrySendBytes(in byte[] message)
++    {
++        try
++        {
++            // @TODO: Check packet size, if too big, convert to partial packet, and send partial packets
++            _receivingUdpClient.Send(message, message.Length, _serverEndpoint);
++            if (!_isConnected && message.Length > 0)
++                Interlocked.Exchange(ref _lastHandshakeSendTimestamp, Stopwatch.GetTimestamp());
++            return true;
++        }
++        catch (ObjectDisposedException)
++        {
++            _isConnected = false;
++            return false;
++        }
++        catch (SocketException)
++        {
++            _isConnected = false;
++            return false;
++        }
++    }
++
++    private void TryReconnect()
+     {
+-        // @TODO: Check packet size, if too big, convert to partial packet, and send partial packets
+-        _receivingUdpClient.Send(message, message.Length, _serverEndpoint);
++        if (string.IsNullOrWhiteSpace(_modulePath))
++            return;
++
++        if (_isConnected)
++            return;
++
++        if (!TryBeginHandshake("reconnect"))
++            return;
++
++        if (Interlocked.Exchange(ref _reconnectInProgress, 1) == 1)
++        {
++            Interlocked.Exchange(ref _handshakePending, 0);
++            return;
++        }
++
++        try
++        {
++            var handshakePkt = new HandshakePacket
++            {
++                ModulePath = _modulePath
++            };
++
++            if (!TrySendBytes(handshakePkt.GetBytes()))
++            {
++                Interlocked.Exchange(ref _handshakePending, 0);
++            }
++            else
++            {
++                Interlocked.Exchange(ref _lastHandshakeSendTimestamp, Stopwatch.GetTimestamp());
++            }
++        }
++        finally
++        {
++            Interlocked.Exchange(ref _reconnectInProgress, 0);
++        }
+     }
++
+     public void SendData(in IpcPacket packet)
+     {
+         if ( _isConnected || packet.GetPacketType() == IpcPacket.PacketType.Handshake)
+@@ -111,18 +199,28 @@ public class VrcftSandboxClient : UdpFullDuplex
+                 byte[][] packetChunkBytes = PartialPacket.SplitPacketIntoChunks(packetData, MTU);
+                 foreach ( var packetChunk in packetChunkBytes )
+                 {
+-                    SendData(packetChunk);
++                    if (!TrySendBytes(packetChunk))
++                    {
++                        _eventBus.Push(packet);
++                        TryReconnect();
++                        return;
++                    }
+                     Thread.Sleep(1);    //TODO: Potentially switch to ACK based chunking system
+                 }
+             }
+             else
+             {
+-                SendData(packetData);
++                if (!TrySendBytes(packetData))
++                {
++                    _eventBus.Push(packet);
++                    TryReconnect();
++                }
+             }
+         }
+         else
+         {
+             _eventBus.Push(packet);
++            TryReconnect();
+         }
+     }
+ 
+@@ -140,4 +238,4 @@ public class VrcftSandboxClient : UdpFullDuplex
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/VRCFaceTracking.Core/Sandboxing/VrcftSandboxServer.cs b/VRCFaceTracking.Core/Sandboxing/VrcftSandboxServer.cs
+index 329fe84..3ca5e57 100644
+--- a/VRCFaceTracking.Core/Sandboxing/VrcftSandboxServer.cs
++++ b/VRCFaceTracking.Core/Sandboxing/VrcftSandboxServer.cs
+@@ -48,10 +48,20 @@ public class VrcftSandboxServer : UdpFullDuplex
+                 var handshakePacket = (HandshakePacket) packet;
+                 if ( handshakePacket.IsValid )
+                 {
+-                    _logger.LogInformation($"Received handshake from port {endpoint.Port}. Sending ACK...");
++                    var isDuplicateHandshake = _connectedClients.Contains(endpoint.Port);
++                    if ( !isDuplicateHandshake )
++                    {
++                        _logger.LogInformation($"Received handshake from port {endpoint.Port}. Sending ACK...");
++                        _connectedClients.Add(endpoint.Port);
++                    }
++
+                     // Return ACK
+                     SendData(in packet, in endpoint);
+-                    _connectedClients.Add(endpoint.Port);
++
++                    if ( isDuplicateHandshake )
++                    {
++                        return;
++                    }
+                 }
+             }
+             if ( OnPacketReceived != null )
+diff --git a/VRCFaceTracking.Core/Services/OscSendService.cs b/VRCFaceTracking.Core/Services/OscSendService.cs
+index d15339b..3b08577 100644
+--- a/VRCFaceTracking.Core/Services/OscSendService.cs
++++ b/VRCFaceTracking.Core/Services/OscSendService.cs
+@@ -1,6 +1,8 @@
+-﻿using System.ComponentModel.DataAnnotations;
++using System;
++using System.Collections.Generic;
+ using System.Net;
+ using System.Net.Sockets;
++using System.Threading;
+ using Microsoft.Extensions.Logging;
+ using VRCFaceTracking.Core.Contracts;
+ using VRCFaceTracking.Core.OSC;
+@@ -14,9 +16,16 @@ public class OscSendService
+ {
+     private readonly ILogger<OscSendService> _logger;
+     private readonly IOscTarget _oscTarget;
++    private readonly object _socketLock = new();
++    private readonly Timer _statsTimer;
+ 
+     private Socket _sendSocket;
++    private IPEndPoint? _currentEndpoint;
+     private readonly byte[] _sendBuffer = new byte[4096];
++    private OscMessageMeta[] _metaBuffer = new OscMessageMeta[256];
++    private int _successfulDispatchesThisWindow;
++    private int _batchesThisWindow;
++    private int _failedDispatchesThisWindow;
+ 
+     private CancellationTokenSource _cts;
+     public Action<int> OnMessagesDispatched = _ => { };
+@@ -28,12 +37,14 @@ public class OscSendService
+     {
+         _logger = logger;
+         _cts = new CancellationTokenSource();
++        _statsTimer = new Timer(_ => LogStats(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+ 
+         _oscTarget = oscTarget;
+ 
+         _oscTarget.PropertyChanged += (_, args) =>
+         {
+-            if (args.PropertyName is not nameof(IOscTarget.OutPort))
++            if (args.PropertyName is not nameof(IOscTarget.OutPort) &&
++                args.PropertyName is not nameof(IOscTarget.DestinationAddress))
+             {
+                 return;
+             }
+@@ -52,51 +63,182 @@ public class OscSendService
+         };
+     }
+ 
++    private void LogStats()
++    {
++        var dispatched = Interlocked.Exchange(ref _successfulDispatchesThisWindow, 0);
++        var batches = Interlocked.Exchange(ref _batchesThisWindow, 0);
++        var failures = Interlocked.Exchange(ref _failedDispatchesThisWindow, 0);
++        var endpoint = _currentEndpoint?.ToString() ?? "unset";
++
++        _logger.LogInformation(
++            "OscSend stats: dispatched={dispatched} batches={batches} failures={failures} connected={connected} endpoint={endpoint}",
++            dispatched,
++            batches,
++            failures,
++            _oscTarget.IsConnected,
++            endpoint);
++    }
++
+     private void UpdateTarget(IPEndPoint endpoint)
+     {
+-        _cts.Cancel();
+-        _sendSocket?.Close();
+-        _oscTarget.IsConnected = false;
++        lock (_socketLock)
++        {
++            _cts.Cancel();
++            _sendSocket?.Close();
++            _oscTarget.IsConnected = false;
++            _currentEndpoint = endpoint;
+ 
+-        _sendSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
++            _sendSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
++
++            try
++            {
++                _sendSocket.Connect(endpoint);
++                _oscTarget.IsConnected = true;
++            }
++            catch (SocketException ex)
++            {
++                _logger.LogWarning($"Failed to bind to sender endpoint: {endpoint}. {ex.Message}");
++            }
++            finally
++            {
++                _cts = new CancellationTokenSource();
++            }
++        }
++    }
++
++    private async Task<bool> TrySendAsync(ReadOnlyMemory<byte> payload)
++    {
++        Socket socket;
++        lock (_socketLock)
++        {
++            socket = _sendSocket;
++        }
+ 
+         try
+         {
+-            _sendSocket.Connect(endpoint);
+-            _oscTarget.IsConnected = true;
++            if (socket is null || !socket.Connected)
++            {
++                if (_currentEndpoint is null)
++                {
++                    Interlocked.Increment(ref _failedDispatchesThisWindow);
++                    return false;
++                }
++
++                UpdateTarget(_currentEndpoint);
++                lock (_socketLock)
++                {
++                    socket = _sendSocket;
++                }
++            }
++
++            await socket.SendAsync(payload);
++            return true;
+         }
+-        catch (SocketException ex)
++        catch (ObjectDisposedException)
+         {
+-            _logger.LogWarning($"Failed to bind to sender endpoint: {endpoint}. {ex.Message}");
++            if (_currentEndpoint is null)
++            {
++                Interlocked.Increment(ref _failedDispatchesThisWindow);
++                return false;
++            }
++
++            _logger.LogWarning("OSC send socket was disposed. Rebinding sender endpoint.");
++            UpdateTarget(_currentEndpoint);
++            lock (_socketLock)
++            {
++                socket = _sendSocket;
++            }
++
++            try
++            {
++                await socket.SendAsync(payload);
++                return true;
++            }
++            catch (Exception ex)
++            {
++                Interlocked.Increment(ref _failedDispatchesThisWindow);
++                _logger.LogWarning(ex, "OSC send retry failed after socket disposal.");
++                _oscTarget.IsConnected = false;
++                return false;
++            }
+         }
+-        finally
++        catch (SocketException ex)
+         {
+-            _cts = new CancellationTokenSource();
++            if (_currentEndpoint is null)
++            {
++                Interlocked.Increment(ref _failedDispatchesThisWindow);
++                _logger.LogWarning(ex, "OSC send failed and no endpoint is configured.");
++                _oscTarget.IsConnected = false;
++                return false;
++            }
++
++            _logger.LogWarning(ex, "OSC send failed. Rebinding sender endpoint and retrying.");
++            UpdateTarget(_currentEndpoint);
++            lock (_socketLock)
++            {
++                socket = _sendSocket;
++            }
++
++            try
++            {
++                await socket.SendAsync(payload);
++                return true;
++            }
++            catch (Exception retryEx)
++            {
++                Interlocked.Increment(ref _failedDispatchesThisWindow);
++                _logger.LogWarning(retryEx, "OSC send retry failed after rebinding sender endpoint.");
++                _oscTarget.IsConnected = false;
++                return false;
++            }
+         }
+     }
+ 
+     public async Task Send(OscMessage message, CancellationToken ct)
+     {
+-        var nextByteIndex =await  message.Encode(_sendBuffer, ct);
+-        if (nextByteIndex > 4096)
++        var nextByteIndex = await message.Encode(_sendBuffer, ct);
++        if (nextByteIndex > _sendBuffer.Length)
+         {
++            Interlocked.Increment(ref _failedDispatchesThisWindow);
+             _logger.LogError("OSC message too large to send! Skipping this batch of messages.");
+             return;
+         }
+ 
+-        await _sendSocket?.SendAsync(_sendBuffer[..nextByteIndex])!;
+-        OnMessagesDispatched(1);
++        if (await TrySendAsync(_sendBuffer.AsMemory(0, nextByteIndex)))
++        {
++            Interlocked.Increment(ref _batchesThisWindow);
++            Interlocked.Increment(ref _successfulDispatchesThisWindow);
++            OnMessagesDispatched(1);
++        }
+     }
+ 
+-    public async Task Send(OscMessage[] messages, CancellationToken ct)
++    public Task Send(OscMessage[] messages, CancellationToken ct) => Send((IReadOnlyList<OscMessage>)messages, ct);
++
++    public async Task Send(IReadOnlyList<OscMessage> messages, CancellationToken ct)
+     {
+-        var cbt = messages.Select(m => m._meta).ToArray();
++        EnsureMetaBuffer(messages.Count);
++        for (var i = 0; i < messages.Count; i++)
++            _metaBuffer[i] = messages[i]._meta;
++
+         var index = 0;
+-        while (index < cbt.Length)
++        while (index < messages.Count)
+         {
+-            var length = await Task.Run(() => fti_osc.create_osc_bundle(_sendBuffer, cbt, messages.Length, ref index), ct);
+-            await _sendSocket?.SendAsync(_sendBuffer[..length])!;
++            ct.ThrowIfCancellationRequested();
++            var length = fti_osc.create_osc_bundle(_sendBuffer, _metaBuffer, messages.Count, ref index);
++            if (!await TrySendAsync(_sendBuffer.AsMemory(0, length)))
++                return;
+         }
++
++        Interlocked.Increment(ref _batchesThisWindow);
++        Interlocked.Add(ref _successfulDispatchesThisWindow, index);
+         OnMessagesDispatched(index);
+     }
++
++    private void EnsureMetaBuffer(int requiredLength)
++    {
++        if (_metaBuffer.Length >= requiredLength)
++            return;
++
++        Array.Resize(ref _metaBuffer, requiredLength);
++    }
+ }
+diff --git a/VRCFaceTracking.Core/Services/ParameterSenderService.cs b/VRCFaceTracking.Core/Services/ParameterSenderService.cs
+index 4cb6fea..14a0855 100644
+--- a/VRCFaceTracking.Core/Services/ParameterSenderService.cs
++++ b/VRCFaceTracking.Core/Services/ParameterSenderService.cs
+@@ -1,4 +1,9 @@
+-﻿using Microsoft.Extensions.Hosting;
++using Microsoft.Extensions.Hosting;
++using Microsoft.Extensions.Logging;
++using System;
++using System.Collections.Generic;
++using System.Threading;
++using System.Threading.Tasks;
+ using VRCFaceTracking.Core.Contracts;
+ using VRCFaceTracking.Core.OSC;
+ using VRCFaceTracking.Core.Params.Data;
+@@ -7,17 +12,25 @@ namespace VRCFaceTracking.Core.Services;
+ 
+ public class ParameterSenderService : BackgroundService
+ {
+-    // We probably don't need a queue since we use osc message bundles, but for now, we're keeping it as
+-    // we might want to allow a way for the user to specify bundle or single message sends in the future
+-    private static readonly Queue<OscMessage> SendQueue = new();
+- 
++    private static readonly object SendQueueLock = new();
++    private static readonly SemaphoreSlim PendingUpdateSignal = new(0, 1);
++    private static List<OscMessage> SendQueue = new();
++
++    private readonly ILogger<ParameterSenderService> _logger;
+     private readonly OscSendService _sendService;
+-    private readonly UnifiedTrackingMutator _mutator; // We don't use this but we do want DI to run its constructor
++    private readonly UnifiedTrackingMutator _mutator; // DI side effect
++    private List<OscMessage> _dispatchBuffer = new(256);
++    private int _signalsThisWindow;
++    private int _batchesThisWindow;
++    private int _messagesThisWindow;
++    private int _exceptionsThisWindow;
+ 
+     public static bool AllParametersRelevantStatic
+     {
+-        get; set;
++        get;
++        set;
+     }
++
+     public bool AllParametersRelevant
+     {
+         get => AllParametersRelevantStatic;
+@@ -25,57 +38,129 @@ public class ParameterSenderService : BackgroundService
+         {
+             if (AllParametersRelevantStatic == value) return;
+             AllParametersRelevantStatic = value;
+-            SendQueue.Clear();
++            lock (SendQueueLock)
++            {
++                SendQueue.Clear();
++            }
++
+             foreach (var parameter in UnifiedTracking.AllParameters)
+             {
+                 parameter.ResetParam(Array.Empty<IParameterDefinition>());
+             }
+         }
+     }
+-    
+-    public ParameterSenderService(OscSendService sendService, UnifiedTrackingMutator mutator)
++
++    public ParameterSenderService(ILogger<ParameterSenderService> logger, OscSendService sendService, UnifiedTrackingMutator mutator)
+     {
++        _logger = logger;
+         _sendService = sendService;
+         _mutator = mutator;
+     }
+ 
+-    public static void Enqueue(OscMessage message) => SendQueue.Enqueue(message);
+-    public static void Clear() => SendQueue.Clear();
+-    
+-    protected async override Task ExecuteAsync(CancellationToken cancellationToken)
++    public static void Enqueue(OscMessage message)
++    {
++        lock (SendQueueLock)
++        {
++            SendQueue.Add(message);
++        }
++    }
++
++    public static void Clear()
+     {
++        lock (SendQueueLock)
++        {
++            SendQueue.Clear();
++        }
++    }
++
++    public static void SignalPendingUpdate()
++    {
++        try
++        {
++            if (PendingUpdateSignal.CurrentCount == 0)
++                PendingUpdateSignal.Release();
++        }
++        catch (SemaphoreFullException)
++        {
++            // A concurrent release beat us to it. That is harmless because the loop only needs one wakeup.
++        }
++    }
++
++    private async Task LogStatsAsync(CancellationToken cancellationToken)
++    {
++        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
++        while (await timer.WaitForNextTickAsync(cancellationToken))
++        {
++            int queueDepth;
++            lock (SendQueueLock)
++            {
++                queueDepth = SendQueue.Count;
++            }
++
++            var signals = Interlocked.Exchange(ref _signalsThisWindow, 0);
++            var batches = Interlocked.Exchange(ref _batchesThisWindow, 0);
++            var messages = Interlocked.Exchange(ref _messagesThisWindow, 0);
++            var exceptions = Interlocked.Exchange(ref _exceptionsThisWindow, 0);
++
++            _logger.LogInformation(
++                "ParameterSender stats: signals={signals} batches={batches} messages={messages} queueDepth={queueDepth} exceptions={exceptions}",
++                signals, batches, messages, queueDepth, exceptions);
++        }
++    }
++
++    protected override async Task ExecuteAsync(CancellationToken cancellationToken)
++    {
++        var statsTask = LogStatsAsync(cancellationToken);
+         while (!cancellationToken.IsCancellationRequested)
+         {
+             try
+             {
+-                await Task.Delay(10, cancellationToken);
++                await PendingUpdateSignal.WaitAsync(cancellationToken);
++                Interlocked.Increment(ref _signalsThisWindow);
+ 
+                 await UnifiedTracking.UpdateData(cancellationToken);
+ 
+-                // Send all messages in OSCParams.SendQueue
+-                if (SendQueue.Count <= 0)
++                lock (SendQueueLock)
+                 {
+-                    continue;
+-                }
++                    if (SendQueue.Count <= 0)
++                        continue;
+ 
+-                await _sendService.Send(SendQueue.ToArray(), cancellationToken);
++                    (_dispatchBuffer, SendQueue) = (SendQueue, _dispatchBuffer);
++                }
+ 
+-                SendQueue.Clear();
++                await _sendService.Send(_dispatchBuffer, cancellationToken);
++                Interlocked.Increment(ref _batchesThisWindow);
++                Interlocked.Add(ref _messagesThisWindow, _dispatchBuffer.Count);
++                _dispatchBuffer.Clear();
+             }
+             catch (Exception e)
+             {
++                Interlocked.Increment(ref _exceptionsThisWindow);
++                _logger.LogError(e, "ParameterSender loop exception.");
+                 SentrySdk.CaptureException(e, scope =>
+                 {
+-                    var i = 0;
+-                    foreach (var msg in SendQueue)
++                    lock (SendQueueLock)
+                     {
+-                        scope.SetExtra($"Address {i}", msg.Address);
+-                        scope.SetExtra($"Values {i}", msg._meta.ValueLength);
+-                        scope.SetExtra($"Value 0 {i}", msg.Value);
+-                        i++;
++                        var i = 0;
++                        foreach (var msg in SendQueue)
++                        {
++                            scope.SetExtra($"Address {i}", msg.Address);
++                            scope.SetExtra($"Values {i}", msg._meta.ValueLength);
++                            scope.SetExtra($"Value 0 {i}", msg.Value);
++                            i++;
++                        }
+                     }
+                 });
+             }
+         }
++
++        try
++        {
++            await statsTask;
++        }
++        catch (OperationCanceledException)
++        {
++            // Normal shutdown.
++        }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/VRCFaceTracking.Core/UnifiedTracking.cs b/VRCFaceTracking.Core/UnifiedTracking.cs
+index 6f0b713..c41efdb 100644
+--- a/VRCFaceTracking.Core/UnifiedTracking.cs
++++ b/VRCFaceTracking.Core/UnifiedTracking.cs
+@@ -64,6 +64,11 @@ namespace VRCFaceTracking
+         /// <summary>
+         /// Central update function that updates all output parameter data and pushes the latest expressions from VRCFaceTracking modules into the internal expressions buffer.
+         /// </summary>
+-        public static async Task UpdateData(CancellationToken ct) => OnUnifiedDataUpdated.Invoke(await Task.Run(() => Mutator.MutateData(Data), ct));
++        public static Task UpdateData(CancellationToken ct)
++        {
++            ct.ThrowIfCancellationRequested();
++            OnUnifiedDataUpdated.Invoke(Mutator.MutateData(Data));
++            return Task.CompletedTask;
++        }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs b/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
+index 9434db1..e17910c 100644
+--- a/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
++++ b/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
+@@ -1,4 +1,5 @@
+-﻿using System.CommandLine;
++using System.CommandLine;
++using System.Collections.Concurrent;
+ using System.Diagnostics;
+ using System.Runtime.InteropServices;
+ using Microsoft.Extensions.DependencyInjection;
+@@ -14,6 +15,7 @@ public class ModuleProcessMain
+ {
+     // How long in seconds we should wait for a connection to be established before giving up
+     private const double CONNECTION_TIMEOUT = 60.0; // This is long because some modules like the Vive Facial Tracker software can take a long time to initialise
++    private static readonly TimeSpan PushUpdateWatchdog = TimeSpan.FromMilliseconds(25);
+     private static bool WaitForPackets = true;
+     public static ModuleAssembly DefModuleAssembly;
+     public static ILoggerFactory? LoggerFactory;
+@@ -21,17 +23,54 @@ public class ModuleProcessMain
+     public static VrcftSandboxClient Client;
+     public static CancellationTokenSource cts = new();
+ 
+-    private static Queue<IpcPacket> _packetsToSend = new ();
+-    private static Timer? _connectionTimer;
++    private static readonly ConcurrentQueue<IpcPacket> _packetsToSend = new();
++    private static readonly AutoResetEvent _packetsQueued = new(false);
++    private static int _replyUpdateQueued;
++    private static long _lastUpdateActivityTimestamp = Stopwatch.GetTimestamp();
++    private static int _pushWatchdogFireCount;
++    private static int _replyUpdateEnqueueCount;
++    private static long _replyUpdateEnqueueLogTimestamp = Stopwatch.GetTimestamp();
+ 
+-    private static object _callbackLock = new ();
+-    private static bool _shouldCallReceive = false;
+-    public static void QueueReceiveEvent()
++    private static void MarkUpdateActivity()
+     {
+-        lock ( _callbackLock )
++        Interlocked.Exchange(ref _lastUpdateActivityTimestamp, Stopwatch.GetTimestamp());
++    }
++
++    private static void EnqueuePacket(IpcPacket packet)
++    {
++        if (packet.GetPacketType() == IpcPacket.PacketType.ReplyUpdate)
+         {
+-            _shouldCallReceive = true;
++            if (Interlocked.Exchange(ref _replyUpdateQueued, 1) == 1)
++                return;
++
++            MarkUpdateActivity();
++            var enqueueCount = Interlocked.Increment(ref _replyUpdateEnqueueCount);
++            var now = Stopwatch.GetTimestamp();
++            if (enqueueCount == 1 || Stopwatch.GetElapsedTime(Interlocked.Read(ref _replyUpdateEnqueueLogTimestamp)) >= TimeSpan.FromSeconds(5))
++            {
++                Interlocked.Exchange(ref _replyUpdateEnqueueLogTimestamp, now);
++                Logger?.LogInformation("ReplyUpdate enqueue stats: count={count} connected={connected}", enqueueCount, Client?.IsConnected);
++            }
+         }
++
++        _packetsToSend.Enqueue(packet);
++        _packetsQueued.Set();
++    }
++
++    private static void QueueImmediateUpdate()
++    {
++        EnqueuePacket(new ReplyUpdatePacket());
++    }
++
++    private static bool ShouldKickPushWatchdog()
++    {
++        if (DefModuleAssembly?.TrackingModule?.SupportsPushUpdates != true)
++            return false;
++
++        if (DefModuleAssembly._updateCts?.IsCancellationRequested == true)
++            return false;
++
++        return Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastUpdateActivityTimestamp)) >= PushUpdateWatchdog;
+     }
+ 
+     public static int Main(string[] args)
+@@ -40,7 +79,7 @@ public class ModuleProcessMain
+         {
+             Logger.LogInformation("Received SIGTERM");
+             WaitForPackets = false;
+-            DefModuleAssembly._updateCts.Cancel();
++            DefModuleAssembly._updateCts?.Cancel();
+             cts.Cancel();
+             cts.Token.WaitHandle.WaitOne(TimeSpan.FromSeconds(5));
+         };
+@@ -61,22 +100,16 @@ public class ModuleProcessMain
+             {
+                 Description = "The path to the module to load."
+             };
+-            var parentPidOption = new Option<int?>("--parent-pid")
+-            {
+-                Description = "PID of the parent VRCFT process. Module process exits if parent dies."
+-            };
+ 
+             var rootCommand = new RootCommand("VRCFT Sandbox Module");
+             rootCommand.Options.Add(portOption);
+             rootCommand.Options.Add(modulePathOption);
+-            rootCommand.Options.Add(parentPidOption);
+ 
+             rootCommand.SetAction(parseResult =>
+             {
+                 var modulePath = parseResult.GetValue(modulePathOption);
+                 var port = parseResult.GetValue(portOption);
+-                var parentPid = parseResult.GetValue(parentPidOption);
+-                VrcftMain(modulePath!, port ?? 0, parentPid);
++                VrcftMain(modulePath!, port ?? 0);
+                 return 0;
+             });
+ 
+@@ -99,11 +132,8 @@ public class ModuleProcessMain
+         }
+     }
+ 
+-    static int VrcftMain(string modulePath, int serverPortNumber, int? parentPid = null)
++    static int VrcftMain(string modulePath, int serverPortNumber)
+     {
+-        // Give the main process enough time to add the module to the list before we begin sending data
+-        Thread.Sleep(50);
+-
+         ServiceProvider serviceProvider = new ServiceCollection()
+         .AddLogging((loggingBuilder) => loggingBuilder
+                 .ClearProviders()
+@@ -118,45 +148,10 @@ public class ModuleProcessMain
+ 
+         LoggerFactory = serviceProvider.GetService<ILoggerFactory>();
+         Logger = LoggerFactory.CreateLogger<ModuleProcessMain>();
+-
+-        // Separate watchdog thread independent of module code to ensure module shutdown  
+-        if (parentPid.HasValue)
+-        {
+-            var watchdogThread = new Thread(() =>
+-            {
+-                try
+-                {
+-                    using var parent = Process.GetProcessById(parentPid.Value);
+-                    parent.WaitForExit();
+-                }
+-                catch (Exception) { }
+-
+-                // Tryna be polite and give 10 seconds to tear down cleanly. Will kill process if we're still alive after 10 secs
+-                var teardownThread = new Thread(() =>
+-                {
+-                    try
+-                    {
+-                        DefModuleAssembly?._updateCts?.Cancel();
+-                        DefModuleAssembly?.TrackingModule?.Teardown();
+-                    }
+-                    catch (Exception) { }
+-                });
+-                teardownThread.IsBackground = true;
+-                teardownThread.Start();
+-                teardownThread.Join(TimeSpan.FromSeconds(10));
+-
+-                Process.GetCurrentProcess().Kill();
+-            });
+-            watchdogThread.IsBackground = true;
+-            watchdogThread.Name = "ParentWatchdog";
+-            watchdogThread.Start();
+-        }
+-        else
+-        {
+-            Logger.LogWarning("No parent pid provided. Lingering process detection is limited to existing timeouts and graceful shutdown");
+-        }
++        TryNormalizePriority();
+ 
+         // A module process will connect to a given port number first. We try connecting to the server for 30 seconds, then give up, returning an error code in the process.
++        Stopwatch stopwatch = new Stopwatch(); // For timeout
+         Client = new VrcftSandboxClient(serverPortNumber, LoggerFactory);
+ 
+         // Bind the log function so that we can forward log messages to VRCFT's main process
+@@ -169,6 +164,8 @@ public class ModuleProcessMain
+         // Try loading the module
+         DefModuleAssembly = new ModuleAssembly(Logger, LoggerFactory, modulePath);
+         DefModuleAssembly.TryLoadAssembly();
++        if (DefModuleAssembly.TrackingModule != null)
++            DefModuleAssembly.TrackingModule.RequestImmediateUpdate = QueueImmediateUpdate;
+ 
+         // Initialise to invalid state
+         UnifiedTracking.Data = new() {
+@@ -195,10 +192,9 @@ public class ModuleProcessMain
+             UnifiedTracking.Data.Shapes[i].Weight = 0xFFFFFFFF;
+         }
+ 
+-        Client.OnReceiveShouldBeQueued += QueueReceiveEvent;
+         Client.OnPacketReceivedCallback += (in IpcPacket packet) => {
+             // Reset the timeout
+-            _connectionTimer?.Change(TimeSpan.FromSeconds(CONNECTION_TIMEOUT), Timeout.InfiniteTimeSpan);
++            stopwatch.Restart();
+ 
+             // Handle packets
+             switch ( packet.GetPacketType() )
+@@ -211,7 +207,7 @@ public class ModuleProcessMain
+                             eyeAvailable        = result.SupportsEye,
+                             expressionAvailable = result.SupportsExpression
+                         };
+-                        _packetsToSend.Enqueue(pkt);
++                        EnqueuePacket(pkt);
+                         break;
+                     }
+                 case IpcPacket.PacketType.EventInit:
+@@ -234,16 +230,18 @@ public class ModuleProcessMain
+                         }
+                         
+                         DefModuleAssembly._updateCts = new CancellationTokenSource();
+-                        var thread = new Thread(() =>
++                        MarkUpdateActivity();
++                        if (!DefModuleAssembly.TrackingModule.SupportsPushUpdates)
+                         {
+-                            while (!DefModuleAssembly._updateCts.IsCancellationRequested)
++                            var thread = new Thread(() =>
+                             {
+-                                DefModuleAssembly.TrackingModule.Update();
+-                            }
+-                        });
+-                        // Background thread as to not prevent the CLR from terminating if stuck in native code (looking at you vive)
+-                        thread.IsBackground = true;
+-                        thread.Start();
++                                while (!DefModuleAssembly._updateCts.IsCancellationRequested)
++                                {
++                                    DefModuleAssembly.TrackingModule.Update();
++                                }
++                            });
++                            thread.Start();
++                        }
+                         
+                         var pktNew = new ReplyInitPacket()
+                         {
+@@ -252,7 +250,8 @@ public class ModuleProcessMain
+                             ModuleInformationName   = DefModuleAssembly.TrackingModule.ModuleInformation.Name,
+                             IconDataStreams         = DefModuleAssembly.TrackingModule.ModuleInformation.StaticImages
+                         };
+-                        _packetsToSend.Enqueue(pktNew);
++                        pktNew.prefersPushUpdates = DefModuleAssembly.TrackingModule.SupportsPushUpdates;
++                        EnqueuePacket(pktNew);
+                         break;
+                     }
+ 
+@@ -288,7 +287,7 @@ public class ModuleProcessMain
+                     {
+                         // Logger.LogDebug("EventUpdate");
+                         var pkt = new ReplyUpdatePacket();
+-                        _packetsToSend.Enqueue(pkt);
++                        EnqueuePacket(pkt);
+                         break;
+                     }
+ 
+@@ -311,33 +310,47 @@ public class ModuleProcessMain
+         Client.Connect(modulePath);
+         Logger.LogInformation("Initializing {module}", DefModuleAssembly.Assembly.ToString());
+ 
+-        _connectionTimer = new Timer(_ =>
+-        {
+-            Logger.LogWarning("No packets received for {timeout}s, assuming connection lost", CONNECTION_TIMEOUT);
+-            Process.GetCurrentProcess().Kill();
+-        }, null, TimeSpan.FromSeconds(CONNECTION_TIMEOUT), Timeout.InfiniteTimeSpan);
+-
++        stopwatch.Start();
++        
+         // Loop infinitely while we wait for commands
+         while ( WaitForPackets && !cts.IsCancellationRequested)
+         {
++            if ( stopwatch.Elapsed.TotalSeconds > CONNECTION_TIMEOUT )
++            {
++                Client.Close();
++                return ModuleProcessExitCodes.NETWORK_CONNECTION_TIMED_OUT;
++            }
++
+             // Send packets in loop
++            var sentPacket = false;
+             while (_packetsToSend.TryDequeue(out IpcPacket pkt))
+             {
+                 if (pkt == null) continue;  // Ignore your IDE. This can and will be null at some point as we're not locking
++                if (pkt.GetPacketType() == IpcPacket.PacketType.ReplyUpdate)
++                    Interlocked.Exchange(ref _replyUpdateQueued, 0);
+                 Client.SendData(pkt);
++                sentPacket = true;
+             }
+ 
+-            // Tell the client to receive data
+-            if ( _shouldCallReceive )
++            if (!sentPacket)
+             {
+-                Client.ReceivePackets();
+-            }
++                var waitTimeout = Client.IsConnected ? 10 : 50;
++                WaitHandle.WaitAny([_packetsQueued, cts.Token.WaitHandle], waitTimeout);
++
++                if (ShouldKickPushWatchdog())
++                {
++                    if (Interlocked.Increment(ref _pushWatchdogFireCount) == 1 || _pushWatchdogFireCount % 50 == 0)
++                        Logger.LogWarning(
++                            "Push update watchdog fired for {module}. Queueing fallback update. connected={connected}",
++                            DefModuleAssembly?.TrackingModule?.ModuleInformation.Name ?? "Unknown",
++                            Client?.IsConnected);
+ 
+-            Thread.Sleep(1);
++                    QueueImmediateUpdate();
++                }
++            }
+         }
+         
+-        DefModuleAssembly._updateCts.Cancel();
+-        _connectionTimer?.Dispose();
++        DefModuleAssembly._updateCts?.Cancel();
+ 
+         if (OperatingSystem.IsWindows())
+         {
+@@ -347,4 +360,29 @@ public class ModuleProcessMain
+         Environment.Exit(ModuleProcessExitCodes.OK);
+         return ModuleProcessExitCodes.OK;
+     }
+-}
+\ No newline at end of file
++
++    private static void TryNormalizePriority()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        try
++        {
++            using var currentProcess = Process.GetCurrentProcess();
++            currentProcess.PriorityClass = ProcessPriorityClass.Normal;
++        }
++        catch
++        {
++            // Best-effort only.
++        }
++
++        try
++        {
++            Thread.CurrentThread.Priority = ThreadPriority.Normal;
++        }
++        catch
++        {
++            // Best-effort only.
++        }
++    }
++}
+diff --git a/VRCFaceTracking.SDK/ExtTrackingModule.cs b/VRCFaceTracking.SDK/ExtTrackingModule.cs
+index ae7ba7c..ef29f7f 100644
+--- a/VRCFaceTracking.SDK/ExtTrackingModule.cs
++++ b/VRCFaceTracking.SDK/ExtTrackingModule.cs
+@@ -7,16 +7,18 @@ public abstract class ExtTrackingModule
+ {
+     // Should UnifiedLibManager try to initialize this module if it's looking for a module that supports eye or lip.
+     public virtual (bool SupportsEye, bool SupportsExpression) Supported => (false, false);
++    public virtual bool SupportsPushUpdates => false;
+ 
+     public ModuleState Status = ModuleState.Uninitialized;
+ 
+     public ILogger Logger;
+ 
+     public ModuleMetadata ModuleInformation;
++    public Action? RequestImmediateUpdate;
+ 
+     public abstract (bool eyeSuccess, bool expressionSuccess) Initialize(bool eyeAvailable, bool expressionAvailable);
+ 
+     public abstract void Update();
+ 
+     public abstract void Teardown();
+-}
+\ No newline at end of file
++}

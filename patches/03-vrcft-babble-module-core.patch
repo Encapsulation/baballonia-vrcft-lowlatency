@@ -1,0 +1,516 @@
+﻿diff --git a/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs b/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs
+index f02692a..f95ccc2 100644
+--- a/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs
++++ b/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs
+@@ -1,5 +1,7 @@
+ ﻿using VRCFaceTracking.Core.Params.Expressions;
+ 
++using System.Linq;
++
+ namespace VRCFaceTracking.Baballonia;
+ 
+ public static class BabbleExpressions
+@@ -282,4 +284,12 @@ public static class BabbleExpressions
+             0f
+         }
+     };
++
++    public static readonly IReadOnlyDictionary<string, UnifiedExpressions[]> AddressToExpressions =
++        Enumerable.Range(0, BabbleExpressionMap.Count)
++            .Select(i => BabbleExpressionMap.ElementAt(i))
++            .GroupBy(entry => entry.Item2)
++            .ToDictionary(
++                group => group.Key,
++                group => group.Select(entry => entry.Item1).Distinct().ToArray());
+ }
+diff --git a/src/VRCFaceTracking.Baballonia/BabbleOSC.cs b/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
+index 6c07199..97e454f 100644
+--- a/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
++++ b/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
+@@ -1,15 +1,25 @@
++using System.Diagnostics;
+ using Microsoft.Extensions.Logging;
+ using System.Net;
+ using System.Net.Sockets;
+ using VRCFaceTracking.Core.OSC;
++using VRCFaceTracking.Core.Params.Data;
++using VRCFaceTracking.Core.Params.Expressions;
+ 
+ namespace VRCFaceTracking.Baballonia;
+ 
+ public class BabbleOsc
+ {
++    private const string FrameReadyAddress = "/vrcft/babble/frameReady";
+     public static readonly float[] EyeExpressions = new float[12];
++    private static readonly TimeSpan RebindBackoff = TimeSpan.FromMilliseconds(25);
++    private static readonly TimeSpan StaleDataThreshold = TimeSpan.FromMilliseconds(250);
++    private static readonly TimeSpan FrameReadyTimeout = TimeSpan.FromMilliseconds(150);
++    private static readonly TimeSpan BindRetryWindow = TimeSpan.FromSeconds(2);
+ 
+     private Socket? _receiver;
++    private readonly object _receiverLock = new();
++    private readonly ILogger _logger;
+ 
+     private bool _loop = true;
+ 
+@@ -18,14 +28,26 @@ public class BabbleOsc
+     private readonly int _resolvedPort;
+ 
+     private readonly string? _resolvedHost;
++    private readonly Action? _onDataUpdated;
+ 
+     private const string DefaultHost = "127.0.0.1";
+ 
+     private const int DefaultPort = 8888;
+ 
+-    private const int TimeoutMs = 10000;
++    private const int TimeoutMs = 50;
++    private int _consecutiveReceiveErrors;
++    private long _lastPacketTimestamp;
++    private int _staleStateActive;
++    private int _receivedPacketCount;
++    private long _lastReceiveLogTimestamp;
++    private int _frameSyncActive;
++    private int _pendingImmediateUpdate;
++    private int _frameReadyCount;
++    private long _lastFrameReadyLogTimestamp;
++    private long _lastFrameReadyTimestamp;
++    private int _consecutiveStaleTimeouts;
+ 
+-    public BabbleOsc(ILogger iLogger, string host, int? port)
++    public BabbleOsc(ILogger iLogger, string host, int? port, Action? onDataUpdated = null)
+     {
+         if (_receiver != null)
+         {
+@@ -33,22 +55,67 @@ public class BabbleOsc
+             return;
+         }
+         _resolvedHost = host ?? DefaultHost;
+-        _resolvedPort = port ?? TimeoutMs;
++        _resolvedPort = port ?? DefaultPort;
++        _onDataUpdated = onDataUpdated;
++        _logger = iLogger;
++        _lastPacketTimestamp = Stopwatch.GetTimestamp();
++        _lastReceiveLogTimestamp = Stopwatch.GetTimestamp();
++        _lastFrameReadyLogTimestamp = Stopwatch.GetTimestamp();
++        _lastFrameReadyTimestamp = Stopwatch.GetTimestamp();
+ 
+         iLogger.LogInformation($"Started BabbleEyeOSC with Host: {_resolvedHost} and Port {_resolvedPort}");
+-        ConfigureReceiver();
++        RecreateReceiver();
+         _loop = true;
+-        _thread = new Thread(ListenLoop);
++        _thread = new Thread(ListenLoop)
++        {
++            IsBackground = true,
++            Name = "BabbleOSC Listen",
++            Priority = ThreadPriority.AboveNormal
++        };
+         _thread.Start();
+     }
+ 
+-    private void ConfigureReceiver()
++    private void RecreateReceiver()
+     {
+-        IPAddress address = IPAddress.Parse(_resolvedHost!);
+-        IPEndPoint localEp = new IPEndPoint(address, _resolvedPort);
+-        _receiver = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+-        _receiver.Bind(localEp);
+-        _receiver.ReceiveTimeout = TimeoutMs;
++        lock (_receiverLock)
++        {
++            try
++            {
++                _receiver?.Close();
++                _receiver?.Dispose();
++            }
++            catch
++            {
++                // Best-effort cleanup only.
++            }
++
++            IPAddress address = IPAddress.Parse(_resolvedHost!);
++            IPEndPoint localEp = new IPEndPoint(address, _resolvedPort);
++            var bindStartedAt = Stopwatch.GetTimestamp();
++
++            while (true)
++            {
++                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
++                try
++                {
++                    socket.Bind(localEp);
++                    socket.ReceiveTimeout = TimeoutMs;
++                    _receiver = socket;
++                    return;
++                }
++                catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse &&
++                                                 Stopwatch.GetElapsedTime(bindStartedAt) < BindRetryWindow)
++                {
++                    socket.Dispose();
++                    Thread.Sleep(RebindBackoff);
++                }
++                catch
++                {
++                    socket.Dispose();
++                    throw;
++                }
++            }
++        }
+     }
+ 
+     private void ListenLoop()
+@@ -58,9 +125,22 @@ public class BabbleOsc
+         {
+             try
+             {
+-                if (_receiver!.IsBound)
++                var receiver = _receiver;
++                if (receiver is { IsBound: true })
+                 {
+-                    int len = _receiver.Receive(array);
++                    int len = receiver.Receive(array);
++                    _consecutiveReceiveErrors = 0;
++                    _consecutiveStaleTimeouts = 0;
++                    _lastPacketTimestamp = Stopwatch.GetTimestamp();
++                    if (Interlocked.Exchange(ref _staleStateActive, 0) == 1)
++                        _logger.LogInformation("BabbleEyeOSC data flow recovered.");
++                    var packetCount = Interlocked.Increment(ref _receivedPacketCount);
++                    if (packetCount == 1 || Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastReceiveLogTimestamp)) >= TimeSpan.FromSeconds(5))
++                    {
++                        Interlocked.Exchange(ref _lastReceiveLogTimestamp, Stopwatch.GetTimestamp());
++                        _logger.LogInformation("BabbleEyeOSC receive stats: packets={packets}", packetCount);
++                    }
++
+                     int messageIndex = 0;
+                     OscMessage oscMessage;
+                     try
+@@ -71,72 +151,229 @@ public class BabbleOsc
+                     {
+                         continue;
+                     }
++
++                    if (oscMessage.Address == FrameReadyAddress)
++                    {
++                        HandleFrameReady();
++                        continue;
++                    }
++
+                     if (oscMessage.Value is float value)
+                     {
++                        var updated = false;
+                         switch (oscMessage.Address)
+                         {
+                             case "/LeftEyeX":
+                                 EyeExpressions[(int)ExpressionMapping.EyeLeftX] = value;
++                                UnifiedTracking.Data.Eye.Left.Gaze.x = value;
++                                updated = true;
+                                 break;
+                             case "/LeftEyeY":
+                                 EyeExpressions[(int)ExpressionMapping.EyeLeftY] = value;
++                                UnifiedTracking.Data.Eye.Left.Gaze.y = value;
++                                updated = true;
+                                 break;
+                             case "/LeftEyeLid":
+                                 EyeExpressions[(int)ExpressionMapping.EyeLeftLid] = value;
++                                UnifiedTracking.Data.Eye.Left.Openness = value;
++                                updated = true;
+                                 break;
+                             case "/LeftEyeWiden":
+                                 EyeExpressions[(int)ExpressionMapping.EyeLeftWiden] = value;
++                                UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeWideLeft].Weight = value;
++                                updated = true;
+                                 break;
+                             // case "/LeftEyeLower":
+                             //     EyeExpressions[(int)ExpressionMapping.EyeLeftLower] = value;
+                             //     break;
+                             case "/LeftEyeBrow":
+                                 EyeExpressions[(int)ExpressionMapping.EyeLeftSquint] = value;
++                                updated = true;
+                                 break;
+                             case "/RightEyeX":
+                                 EyeExpressions[(int)ExpressionMapping.EyeRightX] = value;
++                                UnifiedTracking.Data.Eye.Right.Gaze.x = value;
++                                updated = true;
+                                 break;
+                             case "/RightEyeY":
+                                 EyeExpressions[(int)ExpressionMapping.EyeRightY] = value;
++                                UnifiedTracking.Data.Eye.Right.Gaze.y = value;
++                                updated = true;
+                                 break;
+                             case "/RightEyeLid":
+                                 EyeExpressions[(int)ExpressionMapping.EyeRightLid] = value;
++                                UnifiedTracking.Data.Eye.Right.Openness = value;
++                                updated = true;
+                                 break;
+                             case "/RightEyeWiden":
+                                 EyeExpressions[(int)ExpressionMapping.EyeRightWiden] = value;
++                                UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeWideRight].Weight = value;
++                                updated = true;
+                                 break;
+                             // case "/RightEyeLower":
+                             //     EyeExpressions[(int)ExpressionMapping.EyeRightLower] = value;
+                             //     break;
+                             case "/RightEyeBrow":
+                                 EyeExpressions[(int)ExpressionMapping.EyeRightSquint] = value;
++                                updated = true;
+                                 break;
+                             default:
+-                                if (BabbleExpressions.BabbleExpressionMap.ContainsKey2(oscMessage.Address))
++                                if (BabbleExpressions.AddressToExpressions.TryGetValue(oscMessage.Address, out var mappedExpressions))
++                                {
+                                     BabbleExpressions.BabbleExpressionMap.SetByKey2(oscMessage.Address, value);
++                                    foreach (var expression in mappedExpressions)
++                                    {
++                                        UnifiedTracking.Data.Shapes[(int)expression].Weight = value;
++                                    }
++                                    updated = true;
++                                }
+                                 break;
+                         }
++
++                        if (updated)
++                            HandleDataUpdated();
+                     }
+                 }
+                 else
+                 {
+-                    _receiver.Close();
+-                    _receiver.Dispose();
+-                    ConfigureReceiver();
++                    RecreateReceiver();
++                    Thread.Sleep(RebindBackoff);
++                }
++            }
++            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
++            {
++                if (Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastPacketTimestamp)) >= StaleDataThreshold)
++                {
++                    var shouldRebind = Interlocked.Increment(ref _consecutiveStaleTimeouts) >= 2;
++                    HandleStaleData(rebindReceiver: shouldRebind);
++                }
++                continue;
++            }
++            catch (ObjectDisposedException) when (_loop)
++            {
++                RecreateReceiver();
++                Thread.Sleep(RebindBackoff);
++            }
++            catch (SocketException ex) when (_loop)
++            {
++                _consecutiveReceiveErrors++;
++                if (_consecutiveReceiveErrors == 1 || _consecutiveReceiveErrors % 20 == 0)
++                    _logger.LogWarning(ex, "BabbleEyeOSC receive socket fault. Rebinding receiver.");
++
++                RecreateReceiver();
++                Thread.Sleep(RebindBackoff);
++            }
++            catch (Exception ex) when (_loop)
++            {
++                _consecutiveReceiveErrors++;
++                if (_consecutiveReceiveErrors == 1 || _consecutiveReceiveErrors % 20 == 0)
++                    _logger.LogWarning(ex, "BabbleEyeOSC unexpected receive fault. Rebinding receiver.");
++
++                RecreateReceiver();
++                Thread.Sleep(RebindBackoff);
++            }
++        }
++    }
++
++    private void HandleStaleData(bool rebindReceiver)
++    {
++        var frameSyncWasActive = Interlocked.Exchange(ref _frameSyncActive, 0) == 1;
++        Interlocked.Exchange(ref _pendingImmediateUpdate, 0);
++        if (Interlocked.Exchange(ref _staleStateActive, 1) == 0)
++            _logger.LogWarning("BabbleEyeOSC data flow stalled. Neutralizing eye state{rebindSuffix}{frameSyncSuffix}.",
++                rebindReceiver ? " and rebinding receiver" : string.Empty,
++                frameSyncWasActive ? " and disabling frame sync" : string.Empty);
++        else if (rebindReceiver)
++            _logger.LogWarning("BabbleEyeOSC data flow remains stalled. Rebinding receiver.");
++
++        NeutralizeEyeState();
++        _onDataUpdated?.Invoke();
++        if (rebindReceiver)
++        {
++            RecreateReceiver();
++            Thread.Sleep(RebindBackoff);
++        }
++    }
++
++    private static void NeutralizeEyeState()
++    {
++        EyeExpressions[(int)ExpressionMapping.EyeLeftX] = 0f;
++        EyeExpressions[(int)ExpressionMapping.EyeLeftY] = 0f;
++        EyeExpressions[(int)ExpressionMapping.EyeLeftLid] = 1f;
++        EyeExpressions[(int)ExpressionMapping.EyeLeftWiden] = 0f;
++        EyeExpressions[(int)ExpressionMapping.EyeLeftSquint] = 0f;
++        EyeExpressions[(int)ExpressionMapping.EyeRightX] = 0f;
++        EyeExpressions[(int)ExpressionMapping.EyeRightY] = 0f;
++        EyeExpressions[(int)ExpressionMapping.EyeRightLid] = 1f;
++        EyeExpressions[(int)ExpressionMapping.EyeRightWiden] = 0f;
++        EyeExpressions[(int)ExpressionMapping.EyeRightSquint] = 0f;
++
++        UnifiedTracking.Data.Eye.Left.Gaze.x = 0f;
++        UnifiedTracking.Data.Eye.Left.Gaze.y = 0f;
++        UnifiedTracking.Data.Eye.Left.Openness = 1f;
++        UnifiedTracking.Data.Eye.Right.Gaze.x = 0f;
++        UnifiedTracking.Data.Eye.Right.Gaze.y = 0f;
++        UnifiedTracking.Data.Eye.Right.Openness = 1f;
++        UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeWideLeft].Weight = 0f;
++        UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeWideRight].Weight = 0f;
++        UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintLeft].Weight = 0f;
++        UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintRight].Weight = 0f;
++    }
++
++    private void HandleDataUpdated()
++    {
++        if (Volatile.Read(ref _frameSyncActive) == 1)
++        {
++            var frameReadyAge = Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastFrameReadyTimestamp));
++            if (frameReadyAge > FrameReadyTimeout)
++            {
++                if (Interlocked.Exchange(ref _frameSyncActive, 0) == 1)
++                {
++                    _logger.LogWarning(
++                        "BabbleEyeOSC frame sync timed out after {elapsedMs} ms. Falling back to per-packet updates until frameReady resumes.",
++                        frameReadyAge.TotalMilliseconds);
+                 }
++
++                Interlocked.Exchange(ref _pendingImmediateUpdate, 0);
+             }
+-            catch (Exception)
++            else
+             {
+-                // ignore
++                Interlocked.Exchange(ref _pendingImmediateUpdate, 1);
++                return;
+             }
+         }
++
++        _onDataUpdated?.Invoke();
++    }
++
++    private void HandleFrameReady()
++    {
++        var now = Stopwatch.GetTimestamp();
++        var frameSyncWasInactive = Interlocked.Exchange(ref _frameSyncActive, 1) == 0;
++        Interlocked.Exchange(ref _lastFrameReadyTimestamp, now);
++
++        if (frameSyncWasInactive && Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastPacketTimestamp)) < TimeSpan.FromSeconds(2))
++            _logger.LogInformation("BabbleEyeOSC frame sync resumed.");
++
++        var frameReadyCount = Interlocked.Increment(ref _frameReadyCount);
++        if (frameReadyCount == 1 || Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastFrameReadyLogTimestamp)) >= TimeSpan.FromSeconds(5))
++        {
++            Interlocked.Exchange(ref _lastFrameReadyLogTimestamp, now);
++            _logger.LogInformation("BabbleEyeOSC frame sync stats: frameReady={frameReady} packets={packets}", frameReadyCount, Volatile.Read(ref _receivedPacketCount));
++        }
++
++        if (Interlocked.Exchange(ref _pendingImmediateUpdate, 0) == 1)
++            _onDataUpdated?.Invoke();
+     }
+ 
+     public void Teardown()
+     {
+         _loop = false;
+-        _receiver!.Close();
+-        _receiver.Dispose();
++        lock (_receiverLock)
++        {
++            _receiver?.Close();
++            _receiver?.Dispose();
++        }
+         _thread!.Join();
+     }
+ }
+diff --git a/src/VRCFaceTracking.Baballonia/BabbleVRC.cs b/src/VRCFaceTracking.Baballonia/BabbleVRC.cs
+index c87f146..31e83ec 100644
+--- a/src/VRCFaceTracking.Baballonia/BabbleVRC.cs
++++ b/src/VRCFaceTracking.Baballonia/BabbleVRC.cs
+@@ -6,6 +6,7 @@ namespace VRCFaceTracking.Baballonia;
+ 
+ public class BabbleVrc : ExtTrackingModule
+ {
++    private const int UpdateCadenceMs = 1;
+     private BabbleOsc babbleOSC;
+     private Config config;
+     private bool needsEye;
+@@ -13,11 +14,12 @@ public class BabbleVrc : ExtTrackingModule
+ 
+     // We need to call GetBabbleConfig ahead of Initialize
+     public override (bool SupportsEye, bool SupportsExpression) Supported => (true, true);
++    public override bool SupportsPushUpdates => true;
+ 
+     public override (bool eyeSuccess, bool expressionSuccess) Initialize(bool eyeAvailable, bool expressionAvailable)
+     {
+         config = BabbleConfig.GetBabbleConfig();
+-        babbleOSC = new BabbleOsc(Logger, config.Host, config.Port);
++        babbleOSC = new BabbleOsc(Logger, config.Host, config.Port, () => RequestImmediateUpdate?.Invoke());
+ 
+         List<Stream> list = new List<Stream>();
+         Assembly executingAssembly = Assembly.GetExecutingAssembly();
+@@ -54,64 +56,6 @@ public class BabbleVrc : ExtTrackingModule
+ 
+     public override void Update()
+     {
+-        if (needsEye)
+-        {
+-            // Left Gaze
+-            UnifiedTracking.Data.Eye.Left.Gaze.x = BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftX];
+-            UnifiedTracking.Data.Eye.Left.Gaze.y = BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftY];
+-
+-            // Left Blink
+-            UnifiedTracking.Data.Eye.Left.Openness = BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftLid];
+-
+-            // Left Eye Widen
+-            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeWideLeft].Weight =
+-                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftWiden];
+-
+-            // Left Eye Angry/Lower. This makes "BrowDownLeft"
+-            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.BrowLowererLeft].Weight =
+-                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftLower];
+-            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.BrowPinchLeft].Weight =
+-                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftLower];
+-
+-            // BrowDownLeft
+-            // BrowDownRight
+-
+-            // Left Eye Squint
+-            // UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintLeft].Weight =
+-            //     BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftSquint];
+-
+-            /* --- */
+-
+-            // Right Eye Gaze
+-            UnifiedTracking.Data.Eye.Right.Gaze.x = BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightX];
+-            UnifiedTracking.Data.Eye.Right.Gaze.y = BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightY];
+-
+-            // Right Eye Blink
+-            UnifiedTracking.Data.Eye.Right.Openness = BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightLid];
+-
+-            // Right Eye Widen
+-            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeWideRight].Weight =
+-                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightWiden];
+-
+-            // Right Eye Angry/Lower. This makes "BrowDownRight"
+-            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.BrowLowererRight].Weight =
+-                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightLower];
+-            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.BrowPinchRight].Weight =
+-                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightLower];
+-
+-            // Right Eye Squint
+-            // UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintRight].Weight =
+-            //     BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightSquint];
+-        }
+-
+-        if (needsExpression)
+-        {
+-            foreach (var expression in BabbleExpressions.BabbleExpressionMap!)
+-            {
+-                UnifiedTracking.Data.Shapes[(int)expression].Weight = BabbleExpressions.BabbleExpressionMap.GetByKey1(expression);
+-            }
+-        }
+-
+-        Thread.Sleep(10);
++        Thread.Sleep(UpdateCadenceMs);
+     }
+ }

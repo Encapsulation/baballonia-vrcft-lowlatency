@@ -1,0 +1,16 @@
+_clean/
+_diffwork/
+docs/_private/
+*.zip
+*.7z
+*.log
+*.pdb
+*.dll
+*.exe
+*.onnx
+*.pth
+bin/
+obj/
+App/
+Data/
+LocalSettings.json

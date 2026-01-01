@@ -1,0 +1,5 @@
+metric,stock_ms,fork_ms,reduction_ms,reduction_percent,speedup_x
+mean_processing_or_camera_to_vrcft_output,18.455380,5.016792,13.438588,72.817,3.679
+p90_est_processing_or_camera_to_vrcft_output,27.619000,5.515000,22.104000,80.032,5.008
+vrcft_handoff_mean,8.937788,0.143033,8.794755,98.400,62.488
+vrcft_handoff_p90,17.875000,0.165000,17.710000,99.077,108.333
