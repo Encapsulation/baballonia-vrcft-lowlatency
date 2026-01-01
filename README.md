@@ -17,6 +17,10 @@ This repo contains reviewable patches for the low-latency Baballonia to VRCFaceT
 - Baballonia upstream commit: `5de170b`
 - VRCFaceTracking upstream commit: `fbafdd5`
 
+## License
+
+MIT. See `LICENSE`.
+
 ## Apply
 
 From a clean Baballonia checkout at `5de170b`:
