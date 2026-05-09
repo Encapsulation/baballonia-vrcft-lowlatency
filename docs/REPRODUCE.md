@@ -2,51 +2,23 @@
 
 ## Code
 
-Clone upstream, checkout the listed baseline commits, then apply the patches from this repo.
+Clone both upstream apps, checkout the listed baseline commits, then apply the full patch set.
 
-Use one install path only:
-
-- Full Baballonia repo: run `scripts/apply-baballonia-exact.ps1`.
-- Standalone VRCFaceTracking repo: run `scripts/apply-vrcft-host-exact.ps1`.
-
-Patch `02` is for standalone VRCFaceTracking. Patch `02b` is for Baballonia's pinned `src/VRCFaceTracking` submodule. Patch `03` is for Baballonia's VRCFT-Babble module only.
-
-```bash
+```powershell
 git clone https://github.com/Project-Babble/Baballonia.git
-cd Baballonia
-git checkout 234a393f2f7ca29ccb8aeee0069e2cae155af628
-```
-
-```powershell
-..\BaballoniaVRCFT-CoreShare\scripts\apply-baballonia-exact.ps1
-```
-
-That script applies patch `01` to Baballonia, patch `02b` inside `src/VRCFaceTracking`, then patch `03` to the Baballonia module.
-
-Manual equivalent:
-
-```bash
-git submodule update --init --recursive
-git apply ../BaballoniaVRCFT-CoreShare/patches/01-baballonia-app-core.patch
-(cd src/VRCFaceTracking && git apply ../../../BaballoniaVRCFT-CoreShare/patches/02b-baballonia-vrcft-submodule-core.patch)
-git apply ../BaballoniaVRCFT-CoreShare/patches/03-vrcft-babble-module-core.patch
-```
-
-```bash
 git clone https://github.com/Project-Babble/VRCFaceTracking.git
-cd VRCFaceTracking
-git checkout 09539ec4d458ac6a37c5a620fd025c9042bf7933
-```
+git clone https://github.com/Encapsulation/baballonia-vrcft-lowlatency.git BaballoniaVRCFT-CoreShare
 
-```powershell
+cd .\Baballonia
+git checkout 234a393f2f7ca29ccb8aeee0069e2cae155af628
+..\BaballoniaVRCFT-CoreShare\scripts\apply-baballonia-exact.ps1
+
+cd ..\VRCFaceTracking
+git checkout 09539ec4d458ac6a37c5a620fd025c9042bf7933
 ..\BaballoniaVRCFT-CoreShare\scripts\apply-vrcft-host-exact.ps1
 ```
 
-Manual equivalent:
-
-```bash
-git apply ../BaballoniaVRCFT-CoreShare/patches/02-vrcft-host-core.patch
-```
+This applies patch `01`, patch `02b`, patch `03`, and patch `02`.
 
 ## Build Checks
 

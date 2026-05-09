@@ -1,8 +1,8 @@
 # CI Verification
 
-These checks were run from clean upstream checkouts with the public patch files in this repo.
+These checks were run from clean upstream checkouts with the public patch files in this repo. The full stack uses both sections below.
 
-## Baballonia
+## 1. Baballonia App, Pinned VRCFT Submodule, And Module
 
 Baseline: `Project-Babble/Baballonia` at `234a393f2f7ca29ccb8aeee0069e2cae155af628`.
 
@@ -26,7 +26,7 @@ Verified result:
 - `VRCFaceTracking.Baballonia` module build succeeds.
 - Build warnings are present from upstream dependencies/nullability, but there are `0 Error(s)`.
 
-## VRCFaceTracking
+## 2. VRCFaceTracking App
 
 Baseline: `Project-Babble/VRCFaceTracking` at `09539ec4d458ac6a37c5a620fd025c9042bf7933`.
 
@@ -42,8 +42,9 @@ Verified result:
 - Release solution build succeeds.
 - Build warnings are present from upstream dependencies/nullability, but there are `0 Error(s)`.
 
-## Exact-Fork Note
+## Full Stack Requirement
 
-Patch `03` is for Baballonia's VRCFT-Babble module only. Use it through `scripts/apply-baballonia-exact.ps1`, which also applies patch `02b` inside Baballonia's pinned `src/VRCFaceTracking` submodule. Applying patch `03` without patch `02b` is an invalid partial install.
+Matching the verified local stack requires both apply scripts:
 
-Standalone VRCFaceTracking uses patch `02` only. It should not receive patch `02b` or patch `03`.
+- `scripts/apply-baballonia-exact.ps1` applies `01`, `02b`, and `03`.
+- `scripts/apply-vrcft-host-exact.ps1` applies `02`.
