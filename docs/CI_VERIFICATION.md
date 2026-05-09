@@ -1,6 +1,6 @@
 # CI Verification
 
-These checks were run from clean upstream checkouts with the public patch files in this repo. The full stack uses both sections below.
+These checks were run from clean upstream checkouts with the public patch files in this repo.
 
 ## 1. Baballonia App, Pinned VRCFT Submodule, And Module
 
@@ -41,10 +41,3 @@ Verified result:
 - Patch 2 applies.
 - Release solution build succeeds.
 - Build warnings are present from upstream dependencies/nullability, but there are `0 Error(s)`.
-
-## Full Stack Requirement
-
-Matching the verified local stack requires both apply scripts:
-
-- `scripts/apply-baballonia-exact.ps1` applies `01`, `02b`, and `03`.
-- `scripts/apply-vrcft-host-exact.ps1` applies `02`.
