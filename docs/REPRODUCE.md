@@ -4,6 +4,13 @@
 
 Clone upstream, checkout the listed baseline commits, then apply the patches from this repo.
 
+Use one install path only:
+
+- Full Baballonia repo: run `scripts/apply-baballonia-exact.ps1`.
+- Standalone VRCFaceTracking repo: run `scripts/apply-vrcft-host-exact.ps1`.
+
+Patch `02` is for standalone VRCFaceTracking. Patch `02b` is for Baballonia's pinned `src/VRCFaceTracking` submodule. Patch `03` is for Baballonia's VRCFT-Babble module only.
+
 ```bash
 git clone https://github.com/Project-Babble/Baballonia.git
 cd Baballonia
@@ -14,7 +21,7 @@ git checkout 234a393f2f7ca29ccb8aeee0069e2cae155af628
 ..\BaballoniaVRCFT-CoreShare\scripts\apply-baballonia-exact.ps1
 ```
 
-That script applies patch 1 to Baballonia, patch `02b` inside `src/VRCFaceTracking`, then patch 3 to the Baballonia module. Patch 3 is exact to the fork and expects the VRCFT SDK hooks.
+That script applies patch `01` to Baballonia, patch `02b` inside `src/VRCFaceTracking`, then patch `03` to the Baballonia module.
 
 Manual equivalent:
 

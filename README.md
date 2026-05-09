@@ -28,11 +28,24 @@ MIT. See `LICENSE`.
 
 ## Apply
 
+Most people should use one of the two scripts below. Do not manually mix patch `02` and patch `02b`.
+
+### If You Are Installing Into Baballonia
+
+Use this when you have the full `Baballonia` repo and want the low-latency Baballonia -> VRCFaceTracking path.
+
 From a clean Baballonia checkout at `234a393`, with this repo next to it:
 
 ```powershell
 ..\BaballoniaVRCFT-CoreShare\scripts\apply-baballonia-exact.ps1
 ```
+
+This script does all required Baballonia-side patching:
+
+- Applies patch `01` to Baballonia.
+- Initializes `src/VRCFaceTracking`.
+- Applies patch `02b` inside `src/VRCFaceTracking`.
+- Applies patch `03` to the Baballonia VRCFT-Babble module.
 
 Manual equivalent:
 
@@ -43,11 +56,17 @@ git apply ../BaballoniaVRCFT-CoreShare/patches/01-baballonia-app-core.patch
 git apply ../BaballoniaVRCFT-CoreShare/patches/03-vrcft-babble-module-core.patch
 ```
 
+### If You Are Installing Into Standalone VRCFaceTracking
+
+Use this only when you have the separate `VRCFaceTracking` repo by itself, not the full Baballonia repo.
+
 From a clean standalone VRCFaceTracking checkout at `09539ec`:
 
 ```powershell
 ..\BaballoniaVRCFT-CoreShare\scripts\apply-vrcft-host-exact.ps1
 ```
+
+This script applies patch `02` only. Do not apply patch `02b` or patch `03` to standalone VRCFaceTracking.
 
 Manual equivalent:
 
@@ -55,7 +74,13 @@ Manual equivalent:
 git apply ../BaballoniaVRCFT-CoreShare/patches/02-vrcft-host-core.patch
 ```
 
-Patch 3 intentionally expects the VRCFaceTracking SDK hooks. For Baballonia CI, use patch `02b` inside `src/VRCFaceTracking`; for a standalone VRCFaceTracking repo, use patch `02`.
+### Patch Choice Plain English
+
+- Patch `02` is for a normal standalone `VRCFaceTracking` checkout.
+- Patch `02b` is the same host change rebased for Baballonia's pinned `src/VRCFaceTracking` submodule.
+- Patch `03` is only for the Baballonia module. The Baballonia apply script handles it. Do not use it with standalone VRCFaceTracking.
+
+If you are unsure, start with `scripts/apply-baballonia-exact.ps1` from a clean Baballonia checkout.
 
 ## Not Included
 

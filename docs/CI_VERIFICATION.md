@@ -44,4 +44,6 @@ Verified result:
 
 ## Exact-Fork Note
 
-Patch 3 is exact to the fork and uses the SDK hooks added by patch `02b` inside Baballonia's pinned submodule. Applying only patch 1 and patch 3 to Baballonia is expected to fail module CI because the stock submodule SDK does not yet have `SupportsPushUpdates` or `RequestImmediateUpdate`.
+Patch `03` is for Baballonia's VRCFT-Babble module only. Use it through `scripts/apply-baballonia-exact.ps1`, which also applies patch `02b` inside Baballonia's pinned `src/VRCFaceTracking` submodule. Applying patch `03` without patch `02b` is an invalid partial install.
+
+Standalone VRCFaceTracking uses patch `02` only. It should not receive patch `02b` or patch `03`.
