@@ -34,10 +34,25 @@ From a clean Baballonia checkout at `234a393`, with this repo next to it:
 ..\BaballoniaVRCFT-CoreShare\scripts\apply-baballonia-exact.ps1
 ```
 
+Manual equivalent:
+
+```bash
+git submodule update --init --recursive
+git apply ../BaballoniaVRCFT-CoreShare/patches/01-baballonia-app-core.patch
+(cd src/VRCFaceTracking && git apply ../../../BaballoniaVRCFT-CoreShare/patches/02b-baballonia-vrcft-submodule-core.patch)
+git apply ../BaballoniaVRCFT-CoreShare/patches/03-vrcft-babble-module-core.patch
+```
+
 From a clean standalone VRCFaceTracking checkout at `09539ec`:
 
 ```powershell
 ..\BaballoniaVRCFT-CoreShare\scripts\apply-vrcft-host-exact.ps1
+```
+
+Manual equivalent:
+
+```bash
+git apply ../BaballoniaVRCFT-CoreShare/patches/02-vrcft-host-core.patch
 ```
 
 Patch 3 intentionally expects the VRCFaceTracking SDK hooks. For Baballonia CI, use patch `02b` inside `src/VRCFaceTracking`; for a standalone VRCFaceTracking repo, use patch `02`.

@@ -16,6 +16,15 @@ git checkout 234a393f2f7ca29ccb8aeee0069e2cae155af628
 
 That script applies patch 1 to Baballonia, patch `02b` inside `src/VRCFaceTracking`, then patch 3 to the Baballonia module. Patch 3 is exact to the fork and expects the VRCFT SDK hooks.
 
+Manual equivalent:
+
+```bash
+git submodule update --init --recursive
+git apply ../BaballoniaVRCFT-CoreShare/patches/01-baballonia-app-core.patch
+(cd src/VRCFaceTracking && git apply ../../../BaballoniaVRCFT-CoreShare/patches/02b-baballonia-vrcft-submodule-core.patch)
+git apply ../BaballoniaVRCFT-CoreShare/patches/03-vrcft-babble-module-core.patch
+```
+
 ```bash
 git clone https://github.com/Project-Babble/VRCFaceTracking.git
 cd VRCFaceTracking
@@ -24,6 +33,12 @@ git checkout 09539ec4d458ac6a37c5a620fd025c9042bf7933
 
 ```powershell
 ..\BaballoniaVRCFT-CoreShare\scripts\apply-vrcft-host-exact.ps1
+```
+
+Manual equivalent:
+
+```bash
+git apply ../BaballoniaVRCFT-CoreShare/patches/02-vrcft-host-core.patch
 ```
 
 ## Build Checks
