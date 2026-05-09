@@ -7,16 +7,39 @@ Clone upstream, checkout the listed baseline commits, then apply the patches fro
 ```bash
 git clone https://github.com/Project-Babble/Baballonia.git
 cd Baballonia
-git checkout 5de170b
-git apply ../patches/01-baballonia-app-core.patch
-git apply ../patches/03-vrcft-babble-module-core.patch
+git checkout 234a393f2f7ca29ccb8aeee0069e2cae155af628
 ```
 
+```powershell
+..\BaballoniaVRCFT-CoreShare\scripts\apply-baballonia-exact.ps1
+```
+
+That script applies patch 1 to Baballonia, patch `02b` inside `src/VRCFaceTracking`, then patch 3 to the Baballonia module. Patch 3 is exact to the fork and expects the VRCFT SDK hooks.
+
 ```bash
-git clone https://github.com/benaclejames/VRCFaceTracking.git
+git clone https://github.com/Project-Babble/VRCFaceTracking.git
 cd VRCFaceTracking
-git checkout fbafdd5
-git apply ../patches/02-vrcft-host-core.patch
+git checkout 09539ec4d458ac6a37c5a620fd025c9042bf7933
+```
+
+```powershell
+..\BaballoniaVRCFT-CoreShare\scripts\apply-vrcft-host-exact.ps1
+```
+
+## Build Checks
+
+Baballonia:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\download_dependencies.ps1
+dotnet publish .\src\Baballonia.Desktop\Baballonia.Desktop.csproj -r win-x64 -c Release --self-contained -f net10.0
+dotnet build .\src\VRCFaceTracking.Baballonia\VRCFaceTracking.Baballonia.csproj -c Release
+```
+
+VRCFaceTracking:
+
+```powershell
+dotnet build .\VRCFaceTracking.sln -c Release
 ```
 
 ## Benchmark Method
@@ -35,4 +58,3 @@ python tools/real_probe_proxy.py
 7. Compare `probe-output/summary-*.txt` with `docs/real_e2e_stock_vs_fork_20260508.csv`.
 
 Exact numbers depend on camera, model, CPU, smoothing settings, detector settings, and runtime load.
-

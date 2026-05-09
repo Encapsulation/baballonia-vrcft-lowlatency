@@ -10,7 +10,7 @@
 - Process/thread priority and affinity support.
 - Corruption detector and tracking hot-path support code.
 
-Patch size: 31 files.
+Patch size: 49 files.
 
 ## 02 VRCFaceTracking Host
 
@@ -20,7 +20,14 @@ Patch size: 31 files.
 - OSC send timing and lower-latency handoff path.
 - Module process priority behavior.
 
-Patch size: 14 files.
+Patch size: 15 files.
+
+## 02b Baballonia VRCFT Submodule
+
+- Same host/SDK changes as patch 02.
+- Ported against Baballonia's pinned `src/VRCFaceTracking` submodule baseline.
+
+Patch size: 15 files.
 
 ## 03 VRCFT-Babble Module
 
@@ -30,4 +37,3 @@ Patch size: 14 files.
 - Callback into VRCFT for immediate update.
 
 Patch size: 3 files.
-

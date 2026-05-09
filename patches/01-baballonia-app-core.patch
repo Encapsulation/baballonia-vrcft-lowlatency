@@ -1,4 +1,4 @@
-﻿diff --git a/src/Baballonia.CaptureBin.IO/CaptureFrame.cs b/src/Baballonia.CaptureBin.IO/CaptureFrame.cs
+diff --git a/src/Baballonia.CaptureBin.IO/CaptureFrame.cs b/src/Baballonia.CaptureBin.IO/CaptureFrame.cs
 index 39fd8ac..4891542 100644
 --- a/src/Baballonia.CaptureBin.IO/CaptureFrame.cs
 +++ b/src/Baballonia.CaptureBin.IO/CaptureFrame.cs
@@ -20,8 +20,109 @@ index 39fd8ac..4891542 100644
          if (bgr.Empty()) return new Mat();
          var gray = new Mat();
          Cv2.CvtColor(bgr, gray, ColorConversionCodes.BGR2GRAY);
+diff --git a/src/Baballonia.Desktop/Baballonia.Desktop.csproj b/src/Baballonia.Desktop/Baballonia.Desktop.csproj
+index ade07bf..eb8350d 100644
+--- a/src/Baballonia.Desktop/Baballonia.Desktop.csproj
++++ b/src/Baballonia.Desktop/Baballonia.Desktop.csproj
+@@ -153,14 +153,23 @@
+     </Target>
+     <!-- TODO: this sucks -->
+     <Target Name="CopyModulesToFolderPublish" AfterTargets="Publish">
++        <PropertyGroup>
++            <PublishModulesDir>$(PublishDir)Modules\</PublishModulesDir>
++        </PropertyGroup>
+         <ItemGroup>
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.SerialCameraCapture.dll')" Include="$(OutputPath)\publish\Baballonia.SerialCameraCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.OpenCVCapture.dll')" Include="$(OutputPath)\publish\Baballonia.OpenCVCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.IPCameraCapture.dll')" Include="$(OutputPath)\publish\Baballonia.IPCameraCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.VFTCapture.dll')" Include="$(OutputPath)\publish\Baballonia.VFTCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.LibV4L2Capture.dll')" Include="$(OutputPath)\publish\Baballonia.LibV4L2Capture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.SerialCameraCapture.dll')" Include="$(PublishDir)Baballonia.SerialCameraCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.OpenCVCapture.dll')" Include="$(PublishDir)Baballonia.OpenCVCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.IPCameraCapture.dll')" Include="$(PublishDir)Baballonia.IPCameraCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.VFTCapture.dll')" Include="$(PublishDir)Baballonia.VFTCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.LibV4L2Capture.dll')" Include="$(PublishDir)Baballonia.LibV4L2Capture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.SerialCameraCapture.pdb')" Include="$(PublishDir)Baballonia.SerialCameraCapture.pdb" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.OpenCVCapture.pdb')" Include="$(PublishDir)Baballonia.OpenCVCapture.pdb" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.IPCameraCapture.pdb')" Include="$(PublishDir)Baballonia.IPCameraCapture.pdb" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.VFTCapture.pdb')" Include="$(PublishDir)Baballonia.VFTCapture.pdb" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.LibV4L2Capture.pdb')" Include="$(PublishDir)Baballonia.LibV4L2Capture.pdb" />
+         </ItemGroup>
+-        <Move SourceFiles="@(PublishModuleDlls)" DestinationFolder="$(OutputPath)\publish\Modules\" />
++        <MakeDir Directories="$(PublishModulesDir)" />
++        <Move SourceFiles="@(PublishModuleDlls)" DestinationFolder="$(PublishModulesDir)" Condition="'@(PublishModuleDlls)' != ''" />
+     </Target>
+ 
+     <!-- SkiaSharp is currently broken on ARM for some reason -->
+diff --git a/src/Baballonia.Desktop/Calibration/ICalibrationRoutine.cs b/src/Baballonia.Desktop/Calibration/ICalibrationRoutine.cs
+index 53a8322..abb01d8 100644
+--- a/src/Baballonia.Desktop/Calibration/ICalibrationRoutine.cs
++++ b/src/Baballonia.Desktop/Calibration/ICalibrationRoutine.cs
+@@ -78,7 +78,15 @@ public abstract class PositionalAwareCaptureStep(string name, uint flags, TimeSp
+             return;
+ 
+         var images = frame.image.Split();
+-        PositionalBinCollector.AddFrame(images[1], images[0]);
++        try
++        {
++            PositionalBinCollector.AddFrame(images[1], images[0]);
++        }
++        finally
++        {
++            foreach (var image in images)
++                image.Dispose();
++        }
+     }
+ 
+     protected void StartCollecting()
+@@ -125,7 +133,15 @@ public abstract class BaseCaptureStep(string name, uint flags, TimeSpan time) :
+             return;
+ 
+         var images = frame.image.Split();
+-        AddFrame(images);
++        try
++        {
++            AddFrame(images);
++        }
++        finally
++        {
++            foreach (var image in images)
++                image.Dispose();
++        }
+     }
+ 
+     public virtual Frame AddFrame(Mat[] images)
+@@ -188,14 +204,22 @@ public class GazeCaptureStep(IEyePipelineEventBus bus, TimeSpan time) : BasePosi
+         if (_posDataTimer.Elapsed <= _posDataTimeout)
+         {
+             var images = frame.image.Split();
+-            var f = PositionalBinCollector.AddFrame(images[1], images[0]);
+-            if (f is not null)
++            try
+             {
+-                f.Header = f.Header with
++                var f = PositionalBinCollector.AddFrame(images[1], images[0]);
++                if (f is not null)
+                 {
+-                    RoutineLeftLid = 1,
+-                    RoutineRightLid = 1,
+-                };
++                    f.Header = f.Header with
++                    {
++                        RoutineLeftLid = 1,
++                        RoutineRightLid = 1,
++                    };
++                }
++            }
++            finally
++            {
++                foreach (var image in images)
++                    image.Dispose();
+             }
+         }
+     }
 diff --git a/src/Baballonia.Desktop/Program.cs b/src/Baballonia.Desktop/Program.cs
-index c187d65..d4da1cf 100644
+index c187d65..2900c81 100644
 --- a/src/Baballonia.Desktop/Program.cs
 +++ b/src/Baballonia.Desktop/Program.cs
 @@ -4,6 +4,7 @@ using Baballonia.Desktop.Calibration;
@@ -66,7 +167,7 @@ index c187d65..d4da1cf 100644
 +        try
 +        {
 +            using var currentProcess = Process.GetCurrentProcess();
-+            currentProcess.PriorityClass = ProcessPriorityClass.Normal;
++            currentProcess.PriorityClass = ProcessPriorityClass.AboveNormal;
 +        }
 +        catch
 +        {
@@ -74,36 +175,109 @@ index c187d65..d4da1cf 100644
 +        }
 +    }
  }
-diff --git a/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs b/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs
-index 24a34db..a2514b7 100644
---- a/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs
-+++ b/src/Baballonia.IPCameraCapture/IpCameraCaptureFactory.cs
-@@ -23,5 +23,8 @@ public class IpCameraCaptureFactory : ICaptureFactory
-         return Uri.TryCreate(address, UriKind.RelativeOrAbsolute, out _) && address.StartsWith("http://");
+diff --git a/src/Baballonia.FastCorruptionDetector/FastCorruptionDetector.cs b/src/Baballonia.FastCorruptionDetector/FastCorruptionDetector.cs
+index b9672b8..61241c5 100644
+--- a/src/Baballonia.FastCorruptionDetector/FastCorruptionDetector.cs
++++ b/src/Baballonia.FastCorruptionDetector/FastCorruptionDetector.cs
+@@ -42,52 +42,47 @@ public class FastCorruptionDetector(
+ 
+     private static double CalculateRowPatternConsistency(Mat image)
+     {
+-        Mat gray;
+-
++        Mat? gray = null;
++        var source = image;
+         if (image.Channels() == 3)
+         {
+             gray = new Mat();
+             Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY);
++            source = gray;
+         }
+-        else
++
++        try
+         {
+-            gray = image.Clone();
+-        }
++            using var grayNorm = new Mat();
++            source.ConvertTo(grayNorm, MatType.CV_32F, 1.0 / 255.0);
+ 
+-        Mat grayNorm = new Mat();
+-        gray.ConvertTo(grayNorm, MatType.CV_32F, 1.0 / 255.0);
++            var rowMeans = new double[grayNorm.Rows];
++            for (int i = 0; i < grayNorm.Rows; i++)
++            {
++                using (var row = grayNorm.Row(i))
++                {
++                    Scalar meanScalar = Cv2.Mean(row);
++                    rowMeans[i] = meanScalar.Val0;
++                }
++            }
+ 
+-        var rowMeans = new double[grayNorm.Rows];
+-        for (int i = 0; i < grayNorm.Rows; i++)
+-        {
+-            using (var row = grayNorm.Row(i))
++            if (rowMeans.Length <= 1)
++                return 0.0;
++
++            var diffs = new double[rowMeans.Length - 1];
++            for (int i = 0; i < diffs.Length; i++)
+             {
+-                Scalar meanScalar = Cv2.Mean(row);
+-                rowMeans[i] = meanScalar.Val0;
++                diffs[i] = rowMeans[i + 1] - rowMeans[i];
+             }
+-        }
+ 
+-        if (rowMeans.Length <= 1)
+-        {
+-            gray.Dispose();
+-            grayNorm.Dispose();
+-            return 0.0;
++            double mean = diffs.Average();
++            double variance = diffs.Select(d => Math.Pow(d - mean, 2)).Average();
++            return Math.Sqrt(variance);
+         }
+-
+-        var diffs = new double[rowMeans.Length - 1];
+-        for (int i = 0; i < diffs.Length; i++)
++        finally
+         {
+-            diffs[i] = rowMeans[i + 1] - rowMeans[i];
++            gray?.Dispose();
+         }
+-
+-        double mean = diffs.Average();
+-        double variance = diffs.Select(d => Math.Pow(d - mean, 2)).Average();
+-        double standardDeviation = Math.Sqrt(variance);
+-
+-        gray.Dispose();
+-        grayNorm.Dispose();
+-
+-        return standardDeviation;
      }
  
--    public string GetProviderName() => "Wireless/IP Camera";
-+    public string GetProviderName()
-+    {
-+        return nameof(IpCameraCapture);
-+    }
- }
-diff --git a/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs b/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs
-index 2be4f0a..eb5dcf3 100644
---- a/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs
-+++ b/src/Baballonia.LibV4L2Capture/LibV4L2CaptureFactory.cs
-@@ -17,5 +17,8 @@ public class LibV4L2CaptureFactory(ILoggerFactory loggerFactory) : ICaptureFacto
-         return address.StartsWith("/dev/video");
-     }
+     private void UpdateAdaptiveThreshold(double value)
+diff --git a/src/Baballonia.OpenCVCapture/OpenCVCaptureFactory.cs b/src/Baballonia.OpenCVCapture/OpenCVCaptureFactory.cs
+index 7757513..70200d6 100644
+--- a/src/Baballonia.OpenCVCapture/OpenCVCaptureFactory.cs
++++ b/src/Baballonia.OpenCVCapture/OpenCVCaptureFactory.cs
+@@ -12,6 +12,12 @@ public class OpenCvCaptureFactory(ILoggerFactory loggerFactory) : ICaptureFactor
  
--    public string GetProviderName() => "V4L2";
-+    public string GetProviderName()
-+    {
-+        return "Video4Linux2";
-+    }
- }
+     public bool CanConnect(string address)
+     {
++        if (address.StartsWith("msmf:", StringComparison.OrdinalIgnoreCase) ||
++            address.StartsWith("dshow:", StringComparison.OrdinalIgnoreCase))
++        {
++            address = address[(address.IndexOf(':') + 1)..];
++        }
++
+         var lowered = address.ToLower();
+         var serial = lowered.StartsWith("com") ||
+                      lowered.StartsWith("/dev/tty") ||
 diff --git a/src/Baballonia.OpenCVCapture/OpenCvCapture.cs b/src/Baballonia.OpenCVCapture/OpenCvCapture.cs
-index 9d1f396..d9b7d93 100644
+index 9d1f396..75558a5 100644
 --- a/src/Baballonia.OpenCVCapture/OpenCvCapture.cs
 +++ b/src/Baballonia.OpenCVCapture/OpenCvCapture.cs
 @@ -1,5 +1,9 @@
@@ -161,7 +335,7 @@ index 9d1f396..d9b7d93 100644
          if (OperatingSystem.IsWindows())
          {
              PreferredBackend = VideoCaptureAPIs.DSHOW;
-@@ -33,79 +57,264 @@ public sealed class OpenCvCapture(string source, ILogger<OpenCvCapture> logger)
+@@ -33,79 +57,263 @@ public sealed class OpenCvCapture(string source, ILogger<OpenCvCapture> logger)
          }
          else
          {
@@ -198,7 +372,7 @@ index 9d1f396..d9b7d93 100644
 +        catch
 +        {
 +        }
-+        if (OperatingSystem.IsWindows())
++        if (_selectedBackend == VideoCaptureAPIs.MSMF)
          {
              try
              {
@@ -319,7 +493,7 @@ index 9d1f396..d9b7d93 100644
 +
 +        try
 +        {
-+            Thread.CurrentThread.Priority = ThreadPriority.Normal;
++            Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
 +        }
 +        catch
 +        {
@@ -449,8 +623,7 @@ index 9d1f396..d9b7d93 100644
 +        if (!OperatingSystem.IsWindows())
 +            return TimeSpan.Zero;
 +
-+        if (source.StartsWith(MsmfPrefix, StringComparison.OrdinalIgnoreCase) ||
-+            source.StartsWith(DshowPrefix, StringComparison.OrdinalIgnoreCase))
++        if (source.StartsWith(MsmfPrefix, StringComparison.OrdinalIgnoreCase))
 +            return TimeSpan.FromMilliseconds(1000.0 / 90.0);
 +
 +        return TimeSpan.Zero;
@@ -569,54 +742,6 @@ index 5af1ce0..c458707 100644
 +        _frameReadyEvent.Dispose();
 +    }
  }
-diff --git a/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs b/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs
-index eb0c248..3256915 100644
---- a/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs
-+++ b/src/Baballonia.SerialCameraCapture/SerialCameraCaptureFactory.cs
-@@ -26,5 +26,8 @@ public class SerialCameraCaptureFactory : ICaptureFactory
-                lowered.StartsWith("/dev/ttyacm");
-     }
- 
--    public string GetProviderName() => "Serial Camera";
-+    public string GetProviderName()
-+    {
-+        return nameof(SerialCameraCapture);
-+    }
- }
-diff --git a/src/Baballonia.VFTCapture/VFTCaptureFactory.cs b/src/Baballonia.VFTCapture/VFTCaptureFactory.cs
-index 6de80ba..ac928d5 100644
---- a/src/Baballonia.VFTCapture/VFTCaptureFactory.cs
-+++ b/src/Baballonia.VFTCapture/VFTCaptureFactory.cs
-@@ -20,16 +20,22 @@ public class VFTCaptureFactory(ILoggerFactory loggerFactory) : ICaptureFactory
- 
-     public bool CanConnect(string address)
-     {
--        // address will be either the device's friendly name, or its numerical index 0, 1, 2...
--        var lowered = address.ToLower();
-+        if (OperatingSystem.IsWindows())
-+        {
-+            return true;
-+        }
- 
--        // Hack - prevent VFTCapture from opening Babble trackers
--        if (lowered == "openiristracker") return false;
--        else if (OperatingSystem.IsWindows()) return !lowered.StartsWith("com");
--        else if (OperatingSystem.IsLinux()) return lowered.StartsWith("/dev/video");
-+        if (OperatingSystem.IsLinux())
-+        {
-+            var lowered = address.ToLower();
-+            return lowered.StartsWith("/dev/video");
-+        }
- 
-         return false;
-     }
- 
--    public string GetProviderName() => "Vive Facial Tracker";
-+    public string GetProviderName()
-+    {
-+        return nameof(VFTCapture);
-+    }
- }
 diff --git a/src/Baballonia.VFTCapture/Windows/WindowsVFTCapture.cs b/src/Baballonia.VFTCapture/Windows/WindowsVFTCapture.cs
 index 8def408..e0c9158 100644
 --- a/src/Baballonia.VFTCapture/Windows/WindowsVFTCapture.cs
@@ -660,6 +785,28 @@ index 8def408..e0c9158 100644
  
          return Task.CompletedTask;
      }
+diff --git a/src/Baballonia/App.axaml.cs b/src/Baballonia/App.axaml.cs
+index 26dddc8..72520d1 100644
+--- a/src/Baballonia/App.axaml.cs
++++ b/src/Baballonia/App.axaml.cs
+@@ -122,6 +122,8 @@ public class App : Application
+             services.AddSingleton<DfrSendService>();
+             services.AddTransient<OscQueryServiceWrapper>();
+             services.AddSingleton<ParameterSenderService>();
++            services.AddSingleton<ProcessAffinityService>();
++            services.AddSingleton<EyeTraceRecorderService>();
+             services.AddTransient<GithubService>();
+             services.AddTransient<DataUploaderService>();
+             services.AddTransient<ICommandSenderFactory, CommandSenderFactory>();
+@@ -162,6 +164,8 @@ public class App : Application
+ 
+             services.AddHostedService(provider => provider.GetService<OscRecvService>()!);
+             services.AddHostedService(provider => provider.GetService<ParameterSenderService>()!);
++            services.AddHostedService(provider => provider.GetService<ProcessAffinityService>()!);
++            services.AddHostedService(provider => provider.GetService<EyeTraceRecorderService>()!);
+ 
+             // Configuration
+             IConfiguration config = new ConfigurationBuilder()
 diff --git a/src/Baballonia/Contracts/IVideoSource.cs b/src/Baballonia/Contracts/IVideoSource.cs
 index 1fbe8bb..c2f9eb8 100644
 --- a/src/Baballonia/Contracts/IVideoSource.cs
@@ -798,6 +945,111 @@ index f1f95b5..34f6208 100644
 +            "dshow" => "dshow",
 +            _ => "msmf"
 +        };
++    }
+ }
+diff --git a/src/Baballonia/LocalSettings.json b/src/Baballonia/LocalSettings.json
+index 94f8677..7da7032 100644
+--- a/src/Baballonia/LocalSettings.json
++++ b/src/Baballonia/LocalSettings.json
+@@ -366,6 +366,7 @@
+   "AppSettings_UseOSCQuery": false,
+   "AppSettings_OSCPrefix": "",
+   "AppSettings_OneEuroEnabled": true,
++  "AppSettings_EyeSmoothingFilter": "Savitzky-Golay FIR",
+   "AppSettings_OneEuroMinFreqCutoff": 0.5,
+   "AppSettings_OneEuroSpeedCutoff": 3,
+   "AppSettings_SteamVRAutoStart": false,
+diff --git a/src/Baballonia/Services/DefaultInferenceRunner.cs b/src/Baballonia/Services/DefaultInferenceRunner.cs
+index 1c47882..281dbf3 100644
+--- a/src/Baballonia/Services/DefaultInferenceRunner.cs
++++ b/src/Baballonia/Services/DefaultInferenceRunner.cs
+@@ -11,16 +11,18 @@ using System.Linq;
+ 
+ namespace Baballonia.Services;
+ 
+-public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRunner
++public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRunner, IDisposable
+ {
++    private const string UseGpuEnvVar = "BABALLONIA_USE_GPU";
+     public Size InputSize { get; private set; }
+     public int OutputSize { get; private set; }
+     public DenseTensor<float> InputTensor;
+     private ILogger _logger;
+     private string _inputName;
+-    private InferenceSession _session;
++    private InferenceSession? _session;
+     private string[] _outputExpressionNames;
+     private bool _isOldEyeModel;
++    private float[]? _outputBuffer;
+ 
+ 
+     /// <summary>
+@@ -32,13 +34,19 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
+             throw new FileNotFoundException($"{modelPath} does not exist");
+ 
+         _logger = loggerFactory.CreateLogger(this.GetType().Name + "." + Path.GetFileName(modelPath));
++        if (bool.TryParse(Environment.GetEnvironmentVariable(UseGpuEnvVar), out var useGpuOverride))
++            useGpu = useGpuOverride;
+ 
+         SessionOptions sessionOptions = SetupSessionOptions();
+         if (useGpu)
+             ConfigurePlatformSpecificGpu(sessionOptions, modelPath);
+         else
++        {
+             sessionOptions.AppendExecutionProvider_CPU();
++            _logger.LogInformation("Initialized ExecutionProvider: CPU for {ModelName}", modelPath);
++        }
+ 
++        _session?.Dispose();
+         _session = new InferenceSession(modelPath, sessionOptions);
+         _inputName = _session.InputMetadata.Keys.First();
+         var dimensions = _session.InputMetadata.Values.First().Dimensions;
+@@ -192,16 +200,32 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
+     /// <returns></returns>
+     public float[] Run()
+     {
++        var session = _session ?? throw new InvalidOperationException("Inference session has not been initialized.");
+         var inputs = new List<NamedOnnxValue>
+         {
+             NamedOnnxValue.CreateFromTensor(_inputName, InputTensor)
+         };
+ 
+-        using var results = _session.Run(inputs);
++        using var results = session.Run(inputs);
++
++        var outputTensor = results[0].AsTensor<float>();
++        var outputLength = checked((int)outputTensor.Length);
++        if (_outputBuffer == null || _outputBuffer.Length != outputLength)
++            _outputBuffer = new float[outputLength];
++
++        if (outputTensor is DenseTensor<float> denseOutput)
++        {
++            denseOutput.Buffer.Span.CopyTo(_outputBuffer);
++        }
++        else
++        {
++            var outputIndex = 0;
++            foreach (var value in outputTensor)
++                _outputBuffer[outputIndex++] = value;
++        }
+ 
+-        var output = results[0].AsEnumerable<float>().ToArray();
+-        OutputSize = output.Length;
+-        return output;
++        OutputSize = outputLength;
++        return _outputBuffer;
+     }
+ 
+     // Dictionary mapping eye output names to their indices
+@@ -224,4 +248,10 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
+     {
+         return InputTensor;
+     }
++
++    public void Dispose()
++    {
++        _session?.Dispose();
++        _session = null;
 +    }
  }
 diff --git a/src/Baballonia/Services/EventBus.cs b/src/Baballonia/Services/EventBus.cs
@@ -1015,10 +1267,10 @@ index 8d3c9e3..2d99546 100644
  }
 diff --git a/src/Baballonia/Services/EyeTraceRecorderService.cs b/src/Baballonia/Services/EyeTraceRecorderService.cs
 new file mode 100644
-index 0000000..883c152
+index 0000000..c99ea05
 --- /dev/null
 +++ b/src/Baballonia/Services/EyeTraceRecorderService.cs
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,268 @@
 +using Baballonia.Services.events;
 +using Baballonia.Contracts;
 +using Microsoft.Extensions.Hosting;
@@ -1053,7 +1305,6 @@ index 0000000..883c152
 +    private long _nextSettingsRefreshTick;
 +    private CancellationTokenSource? _writerCancellationTokenSource;
 +    private Task? _writerTask;
-+    private bool _disposed;
 +
 +    public EyeTraceRecorderService(
 +        IEyePipelineEventBus eyePipelineEventBus,
@@ -1077,18 +1328,10 @@ index 0000000..883c152
 +    public async Task StopAsync(CancellationToken cancellationToken)
 +    {
 +        _eyePipelineEventBus.Unsubscribe<EyePipelineEvents.TraceResultEvent>(OnTraceResult);
-+        var writerCancellationTokenSource = Interlocked.Exchange(ref _writerCancellationTokenSource, null);
-+        if (writerCancellationTokenSource != null)
++        if (_writerCancellationTokenSource != null)
 +        {
-+            try
-+            {
-+                writerCancellationTokenSource.Cancel();
-+                _pendingSignal.Release();
-+            }
-+            catch (ObjectDisposedException)
-+            {
-+                // normal if Dispose won the shutdown race
-+            }
++            _writerCancellationTokenSource.Cancel();
++            _pendingSignal.Release();
 +        }
 +
 +        if (_writerTask != null)
@@ -1107,8 +1350,6 @@ index 0000000..883c152
 +        {
 +            CloseActiveSession();
 +        }
-+
-+        writerCancellationTokenSource?.Dispose();
 +    }
 +
 +    private void OnTraceResult(EyePipelineEvents.TraceResultEvent trace)
@@ -1256,29 +1497,9 @@ index 0000000..883c152
 +
 +    public void Dispose()
 +    {
-+        if (_disposed)
-+            return;
-+
-+        _disposed = true;
-+        var writerCancellationTokenSource = Interlocked.Exchange(ref _writerCancellationTokenSource, null);
-+        if (writerCancellationTokenSource != null)
-+        {
-+            try
-+            {
-+                writerCancellationTokenSource.Cancel();
-+                _pendingSignal.Release();
-+            }
-+            catch (ObjectDisposedException)
-+            {
-+                // normal if StopAsync already disposed shutdown primitives
-+            }
-+            finally
-+            {
-+                writerCancellationTokenSource.Dispose();
-+            }
-+        }
-+
++        _writerCancellationTokenSource?.Cancel();
 +        _pendingSignal.Dispose();
++        _writerCancellationTokenSource?.Dispose();
 +        lock (_lock)
 +        {
 +            CloseActiveSession();
@@ -1318,24 +1539,143 @@ index 0000000..883c152
 +        return _localSettingsService.ReadSetting<string>("AppSettings_BigeyeWindowsBackend", "Stable") ?? "Stable";
 +    }
 +}
-diff --git a/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs b/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs
-index dcfc93a..ad94ee3 100644
---- a/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs
-+++ b/src/Baballonia/Services/Inference/DefaultProcessingPipeline.cs
-@@ -15,6 +15,8 @@ public class DefaultProcessingPipeline : IProcessingPipeline
-     public IInferenceRunner? InferenceService;
-     public IFilter? Filter;
- 
-+
-+
-     public float[]? RunUpdate()
+diff --git a/src/Baballonia/Services/Inference/Converters/MatToFloatMatConverter.cs b/src/Baballonia/Services/Inference/Converters/MatToFloatMatConverter.cs
+index b08042a..15956a0 100644
+--- a/src/Baballonia/Services/Inference/Converters/MatToFloatMatConverter.cs
++++ b/src/Baballonia/Services/Inference/Converters/MatToFloatMatConverter.cs
+@@ -9,44 +9,65 @@ public class MatToFloatTensorConverter : IImageConverter
+ {
+     public void Convert(Mat input, DenseTensor<float> outTensor)
      {
-         var frame = VideoSource?.GetFrame(ColorType.Gray8);
+-        Mat resultMat;
+-        if (input.Type() != MatType.CV_32FC(input.Channels()))
+-        {
+-            resultMat = new Mat();
+-            input.ConvertTo(resultMat, MatType.CV_32FC(input.Channels()), 1f / 255f);
+-        }
+-        else
+-        {
+-            resultMat = input;
+-        }
+-        Cv2.Resize(resultMat, resultMat, new Size(outTensor.Dimensions[2], outTensor.Dimensions[3]));
+-        if (!resultMat.IsContinuous())
++        Mat? floatMat = null;
++        Mat? resizedMat = null;
++        Mat? continuousMat = null;
++
++        try
+         {
+-            resultMat = resultMat.Clone(); // Make it continuous
+-        }
++            var targetHeight = outTensor.Dimensions[2];
++            var targetWidth = outTensor.Dimensions[3];
++
++            Mat resultMat = input;
++            if (input.Type() != MatType.CV_32FC(input.Channels()))
++            {
++                floatMat = new Mat();
++                input.ConvertTo(floatMat, MatType.CV_32FC(input.Channels()), 1f / 255f);
++                resultMat = floatMat;
++            }
+ 
+-        int height = resultMat.Rows;
+-        int width = resultMat.Cols;
+-        int channels = resultMat.Channels();
++            if (resultMat.Rows != targetHeight || resultMat.Cols != targetWidth)
++            {
++                resizedMat = new Mat();
++                Cv2.Resize(resultMat, resizedMat, new Size(targetWidth, targetHeight));
++                resultMat = resizedMat;
++            }
+ 
+-        IntPtr matPtr = resultMat.Data;
++            if (!resultMat.IsContinuous())
++            {
++                continuousMat = resultMat.Clone();
++                resultMat = continuousMat;
++            }
+ 
+-        int totalElements = height * width * channels;
++            int height = resultMat.Rows;
++            int width = resultMat.Cols;
++            int channels = resultMat.Channels();
+ 
+-        float[] buffer = new float[totalElements];
+-        Marshal.Copy(matPtr, buffer, 0, totalElements);
++            IntPtr matPtr = resultMat.Data;
+ 
+-        // Convert HWC to NCHW
+-        for (int y = 0; y < height; y++)
+-        {
+-            for (int x = 0; x < width; x++)
++            int totalElements = height * width * channels;
++
++            float[] buffer = new float[totalElements];
++            Marshal.Copy(matPtr, buffer, 0, totalElements);
++
++            // Convert HWC to NCHW
++            for (int y = 0; y < height; y++)
+             {
+-                int pixelIndex = (y * width + x) * channels;
+-                for (int c = 0; c < channels; c++)
++                for (int x = 0; x < width; x++)
+                 {
+-                    outTensor[0, c, y, x] = buffer[pixelIndex + c];
++                    int pixelIndex = (y * width + x) * channels;
++                    for (int c = 0; c < channels; c++)
++                    {
++                        outTensor[0, c, y, x] = buffer[pixelIndex + c];
++                    }
+                 }
+             }
+         }
++        finally
++        {
++            continuousMat?.Dispose();
++            resizedMat?.Dispose();
++            floatMat?.Dispose();
++        }
+     }
+ }
+diff --git a/src/Baballonia/Services/Inference/CorruptionDetectorModes.cs b/src/Baballonia/Services/Inference/CorruptionDetectorModes.cs
+new file mode 100644
+index 0000000..7735ccf
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/CorruptionDetectorModes.cs
+@@ -0,0 +1,28 @@
++using System.Collections.Generic;
++
++namespace Baballonia.Services.Inference;
++
++public static class CorruptionDetectorModes
++{
++    public const string StockRow = "Stock Row";
++    public const string HistogramFlash = "Histogram Flash";
++    public const string HybridRuntimeV2 = "Hybrid Runtime V2";
++
++    public static IReadOnlyList<string> All { get; } =
++    [
++        StockRow,
++        HistogramFlash,
++        HybridRuntimeV2
++    ];
++
++    public static string Normalize(string? value)
++    {
++        return value switch
++        {
++            StockRow or "stock_row" => StockRow,
++            HistogramFlash or "histogram_flash" => HistogramFlash,
++            HybridRuntimeV2 or "hybrid_runtime_v2" => HybridRuntimeV2,
++            _ => StockRow
++        };
++    }
++}
 diff --git a/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs b/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
-index 87706f4..cbc0b2d 100644
+index d6ad472..cbc0b2d 100644
 --- a/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
 +++ b/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
-@@ -1,60 +1,272 @@
+@@ -1,66 +1,272 @@
  ﻿using Baballonia.Services.events;
  using Baballonia.Services.Inference.Enums;
 +using Microsoft.Extensions.Logging;
@@ -1346,15 +1686,16 @@ index 87706f4..cbc0b2d 100644
  
  namespace Baballonia.Services.Inference;
  
--public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : DefaultProcessingPipeline, IDisposable
-+public class EyeProcessingPipeline : DefaultProcessingPipeline, IDisposable
+ public class EyeProcessingPipeline : DefaultProcessingPipeline, IDisposable
  {
--    private readonly FastCorruptionDetector.FastCorruptionDetector _fastCorruptionDetector = new();
 +    private const int LeftLidIndex = 2;
 +    private const int RightLidIndex = 5;
 +    private readonly ILogger<EyeProcessingPipeline> _logger;
-+    private readonly IEyePipelineEventBus _eyePipelineEventBus;
+     private readonly IEyePipelineEventBus _eyePipelineEventBus;
+-    private readonly FastCorruptionDetector.FastCorruptionDetector _fastCorruptionDetector = new();
      private readonly ImageCollector _imageCollector = new();
+-
+-    public EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus)
 +    private long _runCount;
 +    private long _nullFrameCount;
 +    private long _corruptFrameCount;
@@ -1394,10 +1735,10 @@ index 87706f4..cbc0b2d 100644
 +    private long _totalStageMaxTicks;
 +
 +    public EyeProcessingPipeline(ILogger<EyeProcessingPipeline> logger, IEyePipelineEventBus eyePipelineEventBus)
-+    {
+     {
 +        _logger = logger;
-+        _eyePipelineEventBus = eyePipelineEventBus;
-+    }
+         _eyePipelineEventBus = eyePipelineEventBus;
+     }
  
      public bool StabilizeEyes { get; set; } = true;
 +    public IFrameCorruptionDetector CorruptionDetector { get; set; } = FrameCorruptionDetectorFactory.Create(CorruptionDetectorModes.StockRow);
@@ -1411,14 +1752,14 @@ index 87706f4..cbc0b2d 100644
 -
 -        if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
 -            return null;
--
--        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
 +        Interlocked.Increment(ref _runCount);
 +        var runStartTick = Stopwatch.GetTimestamp();
 +        Mat? frame = null;
 +        Mat? transformed = null;
 +        Mat? collected = null;
  
+-        _eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
+-
 -        var transformed = ImageTransformer?.Apply(frame);
 -        if(transformed == null)
 -            return null;
@@ -1529,7 +1870,7 @@ index 87706f4..cbc0b2d 100644
 +        }
 +    }
  
--        eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
+-        _eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
 +    private void LogState(string stage, Mat? frame = null)
 +    {
 +        var nowTick = Environment.TickCount64;
@@ -1622,7 +1963,7 @@ index 87706f4..cbc0b2d 100644
 +        return TicksToMilliseconds(Interlocked.Exchange(ref maxTicksField, 0));
 +    }
  
--        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
+-        _eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
 +    private static double TicksToMilliseconds(double ticks)
 +    {
 +        return ticks * 1000.0 / Stopwatch.Frequency;
@@ -1641,7 +1982,7 @@ index 87706f4..cbc0b2d 100644
      }
  
      private bool ProcessExpressions(ref float[] arKitExpressions)
-@@ -90,16 +302,12 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
+@@ -96,16 +302,12 @@ public class EyeProcessingPipeline : DefaultProcessingPipeline, IDisposable
          }
  
          // [left pitch, left yaw, left lid...
@@ -1664,7 +2005,7 @@ index 87706f4..cbc0b2d 100644
  
          return true;
      }
-@@ -112,7 +320,7 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
+@@ -118,7 +320,7 @@ public class EyeProcessingPipeline : DefaultProcessingPipeline, IDisposable
          TryDisposeObject(ImageConverter);
          TryDisposeObject(InferenceService);
          TryDisposeObject(Filter);
@@ -1741,29 +2082,18 @@ index 2064c8d..4f909c5 100644
          {
              _pipeline.VideoSource.Dispose();
 diff --git a/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs b/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs
-index 4573dbe..c5a7f05 100644
+index 5d7448b..c5a7f05 100644
 --- a/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs
 +++ b/src/Baballonia/Services/Inference/FaceProcessingPipeline.cs
-@@ -1,43 +1,62 @@
+@@ -1,5 +1,6 @@
  ﻿using Baballonia.Services.events;
  using Baballonia.Services.Inference.Enums;
 +using OpenCvSharp;
  using System;
  
  namespace Baballonia.Services.Inference;
+@@ -17,36 +18,45 @@ public class FaceProcessingPipeline : DefaultProcessingPipeline
  
--public class FaceProcessingPipeline(IFacePipelineEventBus facePipelineEventBus) : DefaultProcessingPipeline
-+public class FaceProcessingPipeline : DefaultProcessingPipeline
- {
-+
-+    private readonly IFacePipelineEventBus _facePipelineEventBus;
-+
-+    public FaceProcessingPipeline(IFacePipelineEventBus facePipelineEventBus)
-+    {
-+        _facePipelineEventBus = facePipelineEventBus;
-+    }
-+
-+
      public float[]? RunUpdate()
      {
 -        var frame = VideoSource?.GetFrame(ColorType.Gray8);
@@ -1772,7 +2102,7 @@ index 4573dbe..c5a7f05 100644
 +        Mat? frame = null;
 +        Mat? transformed = null;
  
--        facePipelineEventBus.Publish(new FacePipelineEvents.NewFrameEvent(frame));
+-        _facePipelineEventBus.Publish(new FacePipelineEvents.NewFrameEvent(frame));
 +        try
 +        {
 +            frame = VideoSource?.GetFrame(ColorType.Gray8);
@@ -1786,7 +2116,7 @@ index 4573dbe..c5a7f05 100644
 -            return null;
 +            transformed = ImageTransformer?.Apply(frame);
  
--        facePipelineEventBus.Publish(new FacePipelineEvents.NewTransformedFrameEvent(transformed));
+-        _facePipelineEventBus.Publish(new FacePipelineEvents.NewTransformedFrameEvent(transformed));
 +            if (transformed == null)
 +                return null;
  
@@ -1810,7 +2140,7 @@ index 4573dbe..c5a7f05 100644
 +            if (inferenceResult == null)
 +                return null;
  
--        facePipelineEventBus.Publish(new FacePipelineEvents.NewFilteredResultEvent(inferenceResult));
+-        _facePipelineEventBus.Publish(new FacePipelineEvents.NewFilteredResultEvent(inferenceResult));
 +            if (Filter != null)
 +                inferenceResult = Filter.Filter(inferenceResult);
  
@@ -1827,6 +2157,795 @@ index 4573dbe..c5a7f05 100644
      }
  
      public void Dispose()
+diff --git a/src/Baballonia/Services/Inference/Filters/AlphaBetaFilter.cs b/src/Baballonia/Services/Inference/Filters/AlphaBetaFilter.cs
+new file mode 100644
+index 0000000..541e701
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/AlphaBetaFilter.cs
+@@ -0,0 +1,42 @@
++using System;
++
++namespace Baballonia.Services.Inference.Filters;
++
++public sealed class AlphaBetaFilter : IFilter
++{
++    private readonly float[] _position;
++    private readonly float[] _velocity;
++    private readonly float _alpha;
++    private readonly float _beta;
++    private long _previousTimestamp;
++
++    public AlphaBetaFilter(float[] initial, float alpha = 0.82f, float beta = 0.18f)
++    {
++        _position = (float[])initial.Clone();
++        _velocity = new float[initial.Length];
++        _alpha = alpha;
++        _beta = beta;
++        _previousTimestamp = StopwatchCompat.GetTimestamp();
++    }
++
++    public float[] Filter(float[] input)
++    {
++        if (input.Length != _position.Length)
++            throw new ArgumentException($"Input shape does not match initial shape. Expected: {_position.Length}, got: {input.Length}");
++
++        var dt = StopwatchCompat.GetElapsedSeconds(ref _previousTimestamp);
++        if (dt <= 0.0f)
++            return input;
++
++        for (var i = 0; i < input.Length; i++)
++        {
++            var prediction = _position[i] + _velocity[i] * dt;
++            var residual = input[i] - prediction;
++            _position[i] = prediction + _alpha * residual;
++            _velocity[i] += (_beta / dt) * residual;
++            input[i] = _position[i];
++        }
++
++        return input;
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/Filters/EyeSmoothingModes.cs b/src/Baballonia/Services/Inference/Filters/EyeSmoothingModes.cs
+new file mode 100644
+index 0000000..fa62614
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/EyeSmoothingModes.cs
+@@ -0,0 +1,45 @@
++namespace Baballonia.Services.Inference.Filters;
++
++public static class EyeSmoothingModes
++{
++    public const string Off = "Off";
++    public const string OneEuroCurrent = "OneEuro Current";
++    public const string OneEuroAuto = "OneEuro Auto";
++    public const string AlphaBeta = "Alpha-Beta";
++    public const string KalmanCv = "Kalman CV";
++    public const string AdaptiveKalman = "Adaptive Kalman";
++    public const string StateAdaptiveFir = "State-Adaptive FIR";
++    public const string SavitzkyGolayFir = "Savitzky-Golay FIR";
++    public const string NEuroPredictor = "N-Euro Predictor";
++
++    public static readonly string[] All =
++    [
++        Off,
++        OneEuroCurrent,
++        OneEuroAuto,
++        AlphaBeta,
++        KalmanCv,
++        AdaptiveKalman,
++        StateAdaptiveFir,
++        SavitzkyGolayFir,
++        NEuroPredictor
++    ];
++
++    public static string Normalize(string? value)
++    {
++        return value?.Trim().ToLowerInvariant() switch
++        {
++            null or "" => OneEuroCurrent,
++            "off" => Off,
++            "oneeuro current" or "one euro current" or "oneeurocurrent" or "one_euro_current" => OneEuroCurrent,
++            "oneeuro auto" or "one euro auto" or "oneeuroauto" or "one_euro_auto" => OneEuroAuto,
++            "alpha-beta" or "alphabeta" or "alpha_beta" => AlphaBeta,
++            "kalman cv" or "kalmancv" or "kalman_cv" => KalmanCv,
++            "adaptive kalman" or "adaptivekalman" or "adaptive_kalman" => AdaptiveKalman,
++            "state-adaptive fir" or "state adaptive fir" or "stateadaptivefir" or "state_adaptive_fir" => StateAdaptiveFir,
++            "savitzky-golay fir" or "savitzky golay fir" or "savitzkygolayfir" or "savitzky_golay_fir" or "sgolay" => SavitzkyGolayFir,
++            "n-euro predictor" or "n euro predictor" or "n-euro" or "neuro predictor" or "n_euro_predictor" => NEuroPredictor,
++            _ => OneEuroCurrent
++        };
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/Filters/FilterFactory.cs b/src/Baballonia/Services/Inference/Filters/FilterFactory.cs
+new file mode 100644
+index 0000000..b80fa1e
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/FilterFactory.cs
+@@ -0,0 +1,25 @@
++namespace Baballonia.Services.Inference.Filters;
++
++public static class FilterFactory
++{
++    public static IFilter? Create(string mode, int expressionCount, float oneEuroMinCutoff, float oneEuroSpeedCutoff)
++    {
++        var normalized = EyeSmoothingModes.Normalize(mode);
++        var initial = new float[expressionCount];
++
++        return normalized switch
++        {
++            nameof(EyeSmoothingModes.Off) => null,
++            _ when normalized == EyeSmoothingModes.Off => null,
++            _ when normalized == EyeSmoothingModes.OneEuroCurrent => new OneEuroFilter(initial, oneEuroMinCutoff, oneEuroSpeedCutoff),
++            _ when normalized == EyeSmoothingModes.OneEuroAuto => new OneEuroFilter(initial, 2.0f, 1.0f),
++            _ when normalized == EyeSmoothingModes.AlphaBeta => new AlphaBetaFilter(initial),
++            _ when normalized == EyeSmoothingModes.KalmanCv => new ConstantVelocityKalmanFilter(initial),
++            _ when normalized == EyeSmoothingModes.AdaptiveKalman => new AdaptiveKalmanFilter(initial),
++            _ when normalized == EyeSmoothingModes.StateAdaptiveFir => new StateAdaptiveFirFilter(initial),
++            _ when normalized == EyeSmoothingModes.SavitzkyGolayFir => new SavitzkyGolayFirFilter(initial),
++            _ when normalized == EyeSmoothingModes.NEuroPredictor => new NEuroPredictorFilter(initial),
++            _ => new OneEuroFilter(initial, oneEuroMinCutoff, oneEuroSpeedCutoff)
++        };
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/Filters/KalmanFilters.cs b/src/Baballonia/Services/Inference/Filters/KalmanFilters.cs
+new file mode 100644
+index 0000000..f5bc75b
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/KalmanFilters.cs
+@@ -0,0 +1,117 @@
++using System;
++
++namespace Baballonia.Services.Inference.Filters;
++
++public sealed class ConstantVelocityKalmanFilter : IFilter
++{
++    private readonly KalmanAxis[] _axes;
++    private long _previousTimestamp;
++
++    public ConstantVelocityKalmanFilter(float[] initial)
++    {
++        _axes = new KalmanAxis[initial.Length];
++        for (var i = 0; i < initial.Length; i++)
++            _axes[i] = new KalmanAxis(initial[i], 0f, 0.004f, 0.012f);
++        _previousTimestamp = StopwatchCompat.GetTimestamp();
++    }
++
++    public float[] Filter(float[] input)
++    {
++        if (input.Length != _axes.Length)
++            throw new ArgumentException($"Input shape does not match initial shape. Expected: {_axes.Length}, got: {input.Length}");
++
++        var dt = StopwatchCompat.GetElapsedSeconds(ref _previousTimestamp);
++        if (dt <= 0.0f)
++            return input;
++
++        for (var i = 0; i < input.Length; i++)
++            input[i] = _axes[i].Update(input[i], dt, 1.0f);
++
++        return input;
++    }
++}
++
++public sealed class AdaptiveKalmanFilter : IFilter
++{
++    private readonly KalmanAxis[] _axes;
++    private long _previousTimestamp;
++
++    public AdaptiveKalmanFilter(float[] initial)
++    {
++        _axes = new KalmanAxis[initial.Length];
++        for (var i = 0; i < initial.Length; i++)
++            _axes[i] = new KalmanAxis(initial[i], 0f, 0.006f, 0.010f);
++        _previousTimestamp = StopwatchCompat.GetTimestamp();
++    }
++
++    public float[] Filter(float[] input)
++    {
++        if (input.Length != _axes.Length)
++            throw new ArgumentException($"Input shape does not match initial shape. Expected: {_axes.Length}, got: {input.Length}");
++
++        var dt = StopwatchCompat.GetElapsedSeconds(ref _previousTimestamp);
++        if (dt <= 0.0f)
++            return input;
++
++        for (var i = 0; i < input.Length; i++)
++        {
++            var innovation = Math.Abs(input[i] - _axes[i].PredictedPosition(dt));
++            var adaptiveScale = 1.0f + MathF.Min(6.0f, innovation * 18.0f);
++            input[i] = _axes[i].Update(input[i], dt, adaptiveScale);
++        }
++
++        return input;
++    }
++}
++
++internal sealed class KalmanAxis
++{
++    private float _position;
++    private float _velocity;
++    private float _p00 = 1f;
++    private float _p01;
++    private float _p10;
++    private float _p11 = 1f;
++    private readonly float _baseProcessNoise;
++    private readonly float _measurementNoise;
++
++    public KalmanAxis(float initialPosition, float initialVelocity, float baseProcessNoise, float measurementNoise)
++    {
++        _position = initialPosition;
++        _velocity = initialVelocity;
++        _baseProcessNoise = baseProcessNoise;
++        _measurementNoise = measurementNoise;
++    }
++
++    public float PredictedPosition(float dt) => _position + _velocity * dt;
++
++    public float Update(float measurement, float dt, float adaptiveScale)
++    {
++        var xPred = _position + _velocity * dt;
++        var vPred = _velocity;
++
++        var q = _baseProcessNoise * adaptiveScale;
++        var dt2 = dt * dt;
++        var dt3 = dt2 * dt;
++        var dt4 = dt2 * dt2;
++
++        var p00 = _p00 + dt * (_p10 + _p01) + dt2 * _p11 + q * dt4 * 0.25f;
++        var p01 = _p01 + dt * _p11 + q * dt3 * 0.5f;
++        var p10 = _p10 + dt * _p11 + q * dt3 * 0.5f;
++        var p11 = _p11 + q * dt2;
++
++        var innovation = measurement - xPred;
++        var s = p00 + _measurementNoise;
++        var k0 = p00 / s;
++        var k1 = p10 / s;
++
++        _position = xPred + k0 * innovation;
++        _velocity = vPred + k1 * innovation;
++
++        _p00 = (1 - k0) * p00;
++        _p01 = (1 - k0) * p01;
++        _p10 = p10 - k1 * p00;
++        _p11 = p11 - k1 * p01;
++        return _position;
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/Filters/NEuroPredictorFilter.cs b/src/Baballonia/Services/Inference/Filters/NEuroPredictorFilter.cs
+new file mode 100644
+index 0000000..7ebc6bf
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/NEuroPredictorFilter.cs
+@@ -0,0 +1,207 @@
++using Microsoft.ML.OnnxRuntime;
++using Microsoft.ML.OnnxRuntime.Tensors;
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Text.Json;
++
++namespace Baballonia.Services.Inference.Filters;
++
++public sealed class NEuroPredictorFilter : IFilter, IDisposable
++{
++    private const string ModelFileName = "n_euro_predictor.onnx";
++    private const string MetaFileName = "n_euro_predictor.training_meta.json";
++    private const float MotionEnterThreshold = 0.010f;
++    private const float MotionExitThreshold = 0.004f;
++    private const float PredictionEnterThreshold = 0.006f;
++    private const float PredictionExitThreshold = 0.0025f;
++    private const float NeutralRestZone = 0.035f;
++    private static readonly int[] EyeGazeIndices = [0, 1, 3, 4];
++
++    private readonly int _valueCount;
++    private readonly int _historyFrames;
++    private readonly float[] _history;
++    private readonly float[] _previousRaw;
++    private readonly float[] _rawBuffer;
++    private readonly float[] _calmBuffer;
++    private float[]? _outputBuffer;
++    private readonly bool[] _predictionActive;
++    private readonly StateAdaptiveFirFilter _calmFilter;
++    private readonly DenseTensor<float>? _inputTensor;
++    private readonly InferenceSession? _session;
++    private readonly string? _inputName;
++    private readonly int _forecastIndex;
++    private int _filledFrames;
++
++    public NEuroPredictorFilter(float[] initial)
++    {
++        _valueCount = initial.Length;
++        _previousRaw = (float[])initial.Clone();
++        _rawBuffer = (float[])initial.Clone();
++        _calmBuffer = (float[])initial.Clone();
++        _predictionActive = new bool[initial.Length];
++        _calmFilter = new StateAdaptiveFirFilter((float[])initial.Clone());
++
++        try
++        {
++            var modelPath = Path.Combine(Utils.ModelsDirectory, ModelFileName);
++            var metaPath = Path.Combine(Utils.ModelsDirectory, MetaFileName);
++            if (!File.Exists(modelPath) || !File.Exists(metaPath))
++            {
++                _historyFrames = 1;
++                _history = (float[])initial.Clone();
++                _filledFrames = 1;
++                return;
++            }
++
++            var meta = JsonSerializer.Deserialize<TrainingMeta>(File.ReadAllText(metaPath));
++            _historyFrames = Math.Max(1, meta?.observation_frames ?? 1);
++            _forecastIndex = 0;
++            _history = new float[_historyFrames * _valueCount];
++            SeedHistory(initial);
++
++            var options = new SessionOptions();
++            options.AppendExecutionProvider_CPU();
++            options.InterOpNumThreads = 1;
++            options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
++            options.AddSessionConfigEntry("session.intra_op.allow_spinning", "0");
++
++            _session = new InferenceSession(modelPath, options);
++            _inputName = _session.InputMetadata.Keys.First();
++            _inputTensor = new DenseTensor<float>(new[] { 1, _historyFrames, _valueCount });
++        }
++        catch
++        {
++            _historyFrames = 1;
++            _history = (float[])initial.Clone();
++            _filledFrames = 1;
++            _inputTensor = null;
++            _session = null;
++            _inputName = null;
++        }
++    }
++
++    public float[] Filter(float[] input)
++    {
++        if (input.Length != _valueCount)
++            return input;
++
++        if (_session == null || _inputTensor == null || _inputName == null)
++            return input;
++
++        Array.Copy(input, _rawBuffer, _valueCount);
++        Push(_rawBuffer);
++        if (_filledFrames < _historyFrames)
++            return input;
++
++        var tensorSpan = _inputTensor.Buffer.Span;
++        for (var i = 0; i < _history.Length; i++)
++            tensorSpan[i] = _history[i];
++
++        using var results = _session.Run(new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(_inputName, _inputTensor) });
++        var outputTensor = results[0].AsTensor<float>();
++        ReadOnlySpan<float> outputSpan;
++        if (outputTensor is DenseTensor<float> denseOutput)
++        {
++            outputSpan = denseOutput.Buffer.Span;
++        }
++        else
++        {
++            var outputLength = checked((int)outputTensor.Length);
++            _outputBuffer ??= new float[outputLength];
++            var outputIndex = 0;
++            foreach (var value in outputTensor)
++                _outputBuffer[outputIndex++] = value;
++            outputSpan = new ReadOnlySpan<float>(_outputBuffer, 0, outputLength);
++        }
++
++        var start = _forecastIndex * _valueCount;
++        if (outputSpan.Length < start + _valueCount)
++            return input;
++
++        Array.Copy(_rawBuffer, _calmBuffer, _valueCount);
++        _calmFilter.Filter(_calmBuffer);
++        Array.Copy(_rawBuffer, input, _valueCount);
++
++        if (_valueCount >= 6)
++        {
++            foreach (var index in EyeGazeIndices)
++            {
++                var rawValue = _rawBuffer[index];
++                var calmValue = _calmBuffer[index];
++                var predictedValue = outputSpan[start + index];
++                var delta = Math.Abs(rawValue - _previousRaw[index]);
++                var predictionDelta = Math.Abs(predictedValue - rawValue);
++                var active = _predictionActive[index];
++
++                active = active
++                    ? delta > MotionExitThreshold || predictionDelta > PredictionExitThreshold
++                    : delta > MotionEnterThreshold || predictionDelta > PredictionEnterThreshold;
++
++                if (Math.Abs(rawValue) < NeutralRestZone &&
++                    Math.Abs(calmValue) < NeutralRestZone &&
++                    delta < MotionEnterThreshold)
++                {
++                    active = false;
++                }
++
++                _predictionActive[index] = active;
++                input[index] = active
++                    ? Lerp(calmValue, predictedValue, ComputePredictionBlend(delta, predictionDelta))
++                    : calmValue;
++
++                _previousRaw[index] = rawValue;
++            }
++        }
++        else
++        {
++            for (var i = 0; i < _valueCount; i++)
++                input[i] = outputSpan[start + i];
++        }
++
++        return input;
++    }
++
++    private void SeedHistory(float[] initial)
++    {
++        for (var frame = 0; frame < _historyFrames; frame++)
++            Array.Copy(initial, 0, _history, frame * _valueCount, _valueCount);
++        _filledFrames = _historyFrames;
++    }
++
++    private void Push(float[] input)
++    {
++        var bytesToMove = (_historyFrames - 1) * _valueCount * sizeof(float);
++        if (bytesToMove > 0)
++            Buffer.BlockCopy(_history, _valueCount * sizeof(float), _history, 0, bytesToMove);
++
++        Buffer.BlockCopy(input, 0, _history, (_historyFrames - 1) * _valueCount * sizeof(float), _valueCount * sizeof(float));
++        if (_filledFrames < _historyFrames)
++            _filledFrames++;
++    }
++
++    public void Dispose()
++    {
++        _session?.Dispose();
++    }
++
++    private static float ComputePredictionBlend(float delta, float predictionDelta)
++    {
++        var strongestSignal = Math.Max(delta, predictionDelta);
++        if (strongestSignal <= MotionExitThreshold)
++            return 0f;
++        if (strongestSignal >= MotionEnterThreshold)
++            return 1f;
++
++        return (strongestSignal - MotionExitThreshold) / (MotionEnterThreshold - MotionExitThreshold);
++    }
++
++    private static float Lerp(float a, float b, float t)
++    {
++        t = Math.Clamp(t, 0f, 1f);
++        return a + ((b - a) * t);
++    }
++
++    private sealed record TrainingMeta(int observation_frames, int prediction_frames);
++}
+diff --git a/src/Baballonia/Services/Inference/Filters/OneEuroFilter.cs b/src/Baballonia/Services/Inference/Filters/OneEuroFilter.cs
+index 4dbb243..405ac1f 100644
+--- a/src/Baballonia/Services/Inference/Filters/OneEuroFilter.cs
++++ b/src/Baballonia/Services/Inference/Filters/OneEuroFilter.cs
+@@ -1,101 +1,68 @@
+-﻿using System;
+-
++using System;
+ namespace Baballonia.Services.Inference.Filters;
+ 
+ public class OneEuroFilter : IFilter
+ {
+-    private float[] minCutoff;
+-    private float[] beta;
+-    private float[] dCutoff;
+-    private float[] xPrev;
+-    private float[] dxPrev;
+-    private DateTime tPrev;
++    private readonly float[] _minCutoff;
++    private readonly float[] _beta;
++    private readonly float[] _dCutoff;
++    private readonly float[] _xPrev;
++    private readonly float[] _dxPrev;
++    private long _previousTimestamp;
++
+     public OneEuroFilter(float[] x0, float minCutoff = 1.0f, float beta = 0.0f)
+     {
+-        float dx0 = 0.0f;
+-        float dCutoff = 1.0f;
+-        int length = x0.Length;
+-        this.minCutoff = CreateFilledArray(length, minCutoff);
+-        this.beta = CreateFilledArray(length, beta);
+-        this.dCutoff = CreateFilledArray(length, dCutoff);
+-        // Previous values.
+-        this.xPrev = (float[])x0.Clone();
+-        this.dxPrev = CreateFilledArray(length, dx0);
+-        this.tPrev = DateTime.UtcNow;
++        var length = x0.Length;
++        _minCutoff = CreateFilledArray(length, minCutoff);
++        _beta = CreateFilledArray(length, beta);
++        _dCutoff = CreateFilledArray(length, 1.0f);
++        _xPrev = (float[])x0.Clone();
++        _dxPrev = CreateFilledArray(length, 0.0f);
++        _previousTimestamp = StopwatchCompat.GetTimestamp();
+     }
+ 
+-    public float[] Filter(float[] x)
++    public float[] Filter(float[] input)
+     {
+-        if (x.Length != xPrev.Length)
+-            throw new ArgumentException($"Input shape does not match initial shape. Expected: {xPrev.Length}, got: {x.Length}");
++        if (input.Length != _xPrev.Length)
++            throw new ArgumentException($"Input shape does not match initial shape. Expected: {_xPrev.Length}, got: {input.Length}");
+ 
+-        DateTime now = DateTime.UtcNow;
+-        float elapsedTime = (float)(now - tPrev).TotalSeconds;
++        var elapsedSeconds = StopwatchCompat.GetElapsedSeconds(ref _previousTimestamp);
+ 
+-        if (elapsedTime == 0.0f)
++        if (elapsedSeconds <= 0.0f)
+         {
+-            xPrev = (float[])x.Clone();
+-            return x;
++            return input;
+         }
+ 
+-        float[] t_e = CreateFilledArray(x.Length, elapsedTime);
+-
+-        // Derivative
+-        float[] dx = new float[x.Length];
+-        for (int i = 0; i < x.Length; i++)
++        for (var i = 0; i < input.Length; i++)
+         {
+-            dx[i] = (x[i] - xPrev[i]) / t_e[i];
++            var derivative = (input[i] - _xPrev[i]) / elapsedSeconds;
++            var derivativeAlpha = SmoothingFactor(elapsedSeconds, _dCutoff[i]);
++            var derivativeHat = ExponentialSmoothing(derivativeAlpha, derivative, _dxPrev[i]);
++            var cutoff = _minCutoff[i] + _beta[i] * Math.Abs(derivativeHat);
++            var valueAlpha = SmoothingFactor(elapsedSeconds, cutoff);
++            var filteredValue = ExponentialSmoothing(valueAlpha, input[i], _xPrev[i]);
++
++            _dxPrev[i] = derivativeHat;
++            _xPrev[i] = filteredValue;
++            input[i] = filteredValue;
+         }
+-
+-        float[] a_d = SmoothingFactor(t_e, dCutoff);
+-        float[] dxHat = ExponentialSmoothing(a_d, dx, dxPrev);
+-
+-        // Adjusted cutoff
+-        float[] cutoff = new float[x.Length];
+-        for (int i = 0; i < x.Length; i++)
+-        {
+-            cutoff[i] = minCutoff[i] + beta[i] * Math.Abs(dxHat[i]);
+-        }
+-
+-        float[] a = SmoothingFactor(t_e, cutoff);
+-        float[] xHat = ExponentialSmoothing(a, x, xPrev);
+-
+-        // Store previous values
+-        xPrev = xHat;
+-        dxPrev = dxHat;
+-        tPrev = now;
+-
+-        return xHat;
++        return input;
+     }
+ 
+-    private float[] CreateFilledArray(int length, float value)
++    private static float[] CreateFilledArray(int length, float value)
+     {
+-        float[] arr = new float[length];
+-        for (int i = 0; i < length; i++) arr[i] = value;
++        var arr = new float[length];
++        for (var i = 0; i < length; i++)
++            arr[i] = value;
+         return arr;
+     }
+ 
+-    private float[] SmoothingFactor(float[] t_e, float[] cutoff)
+-    {
+-        int length = t_e.Length;
+-        float[] result = new float[length];
+-        for (int i = 0; i < length; i++)
+-        {
+-            float r = 2 * (float)Math.PI * cutoff[i] * t_e[i];
+-            result[i] = r / (r + 1);
+-        }
+-        return result;
+-    }
+-
+-    private float[] ExponentialSmoothing(float[] a, float[] x, float[] xPrev)
++    private static float SmoothingFactor(float elapsedSeconds, float cutoff)
+     {
+-        int length = a.Length;
+-        float[] result = new float[length];
+-        for (int i = 0; i < length; i++)
+-        {
+-            result[i] = a[i] * x[i] + (1 - a[i]) * xPrev[i];
+-        }
+-        return result;
++        var r = 2 * (float)Math.PI * cutoff * elapsedSeconds;
++        return r / (r + 1);
+     }
+ 
++    private static float ExponentialSmoothing(float alpha, float current, float previous)
++        => alpha * current + (1 - alpha) * previous;
+ }
+diff --git a/src/Baballonia/Services/Inference/Filters/SavitzkyGolayFirFilter.cs b/src/Baballonia/Services/Inference/Filters/SavitzkyGolayFirFilter.cs
+new file mode 100644
+index 0000000..acefdb7
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/SavitzkyGolayFirFilter.cs
+@@ -0,0 +1,53 @@
++namespace Baballonia.Services.Inference.Filters;
++
++public sealed class SavitzkyGolayFirFilter : IFilter
++{
++    private static readonly float[] Coefficients = [31f / 35f, 9f / 35f, -3f / 35f, -5f / 35f, 3f / 35f];
++    private readonly float[][] _history;
++    private readonly int[] _heads;
++    private readonly int[] _counts;
++
++    public SavitzkyGolayFirFilter(float[] initial)
++    {
++        _history = new float[initial.Length][];
++        _heads = new int[initial.Length];
++        _counts = new int[initial.Length];
++
++        for (var i = 0; i < initial.Length; i++)
++        {
++            _history[i] = new float[Coefficients.Length];
++            _history[i][0] = initial[i];
++            _heads[i] = 1 % Coefficients.Length;
++            _counts[i] = 1;
++        }
++    }
++
++    public float[] Filter(float[] input)
++    {
++        for (var i = 0; i < input.Length; i++)
++        {
++            var history = _history[i];
++            var head = _heads[i];
++            history[head] = input[i];
++            head = (head + 1) % Coefficients.Length;
++            _heads[i] = head;
++            if (_counts[i] < Coefficients.Length)
++                _counts[i]++;
++
++            float sum = 0f;
++            float weight = 0f;
++            for (var j = 0; j < _counts[i]; j++)
++            {
++                var coeff = Coefficients[j];
++                var index = (head - 1 - j + Coefficients.Length) % Coefficients.Length;
++                sum += history[index] * coeff;
++                weight += coeff;
++            }
++
++            var newestIndex = (head - 1 + Coefficients.Length) % Coefficients.Length;
++            input[i] = weight != 0f ? sum / weight : history[newestIndex];
++        }
++
++        return input;
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/Filters/StateAdaptiveFirFilter.cs b/src/Baballonia/Services/Inference/Filters/StateAdaptiveFirFilter.cs
+new file mode 100644
+index 0000000..1645bb4
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/StateAdaptiveFirFilter.cs
+@@ -0,0 +1,85 @@
++using System;
++namespace Baballonia.Services.Inference.Filters;
++
++public sealed class StateAdaptiveFirFilter : IFilter
++{
++    private static readonly float[] Weights5 = [1f, 2f, 3f, 2f, 1f];
++    private static readonly float[] Weights3 = [1f, 2f, 1f];
++    private readonly float[][] _history;
++    private readonly int[] _heads;
++    private readonly int[] _counts;
++    private readonly float[] _previous;
++    private long _previousTimestamp;
++
++    public StateAdaptiveFirFilter(float[] initial)
++    {
++        _history = new float[initial.Length][];
++        _heads = new int[initial.Length];
++        _counts = new int[initial.Length];
++        _previous = (float[])initial.Clone();
++        for (var i = 0; i < initial.Length; i++)
++        {
++            _history[i] = new float[5];
++            _history[i][0] = initial[i];
++            _heads[i] = 1 % 5;
++            _counts[i] = 1;
++        }
++        _previousTimestamp = StopwatchCompat.GetTimestamp();
++    }
++
++    public float[] Filter(float[] input)
++    {
++        if (input.Length != _history.Length)
++            throw new ArgumentException($"Input shape does not match initial shape. Expected: {_history.Length}, got: {input.Length}");
++
++        var dt = StopwatchCompat.GetElapsedSeconds(ref _previousTimestamp);
++        if (dt <= 0.0f)
++            return input;
++
++        for (var i = 0; i < input.Length; i++)
++        {
++            var velocity = Math.Abs(input[i] - _previous[i]) / dt;
++            var history = _history[i];
++            var head = _heads[i];
++            history[head] = input[i];
++            head = (head + 1) % 5;
++            _heads[i] = head;
++            if (_counts[i] < 5)
++                _counts[i]++;
++
++            var filtered = velocity switch
++            {
++                > 0.80f => history[(head - 1 + 5) % 5],
++                > 0.25f => TriangularAverage(history, head, _counts[i], 3),
++                _ => TriangularAverage(history, head, _counts[i], 5)
++            };
++
++            _previous[i] = filtered;
++            input[i] = filtered;
++        }
++
++        return input;
++    }
++
++    private static float TriangularAverage(float[] history, int head, int count, int width)
++    {
++        var actualWidth = Math.Min(width, count);
++        if (actualWidth <= 0)
++            return 0f;
++
++        var weights = width == 3 ? Weights3 : Weights5;
++        var offset = weights.Length - actualWidth;
++        float weightedSum = 0f;
++        float totalWeight = 0f;
++        var start = (head - actualWidth + history.Length) % history.Length;
++        for (var i = 0; i < actualWidth; i++)
++        {
++            var index = (start + i) % history.Length;
++            var weight = weights[i + Math.Max(0, offset)];
++            weightedSum += history[index] * weight;
++            totalWeight += weight;
++        }
++
++        return totalWeight > 0 ? weightedSum / totalWeight : history[(head - 1 + history.Length) % history.Length];
++    }
++}
+diff --git a/src/Baballonia/Services/Inference/Filters/StopwatchCompat.cs b/src/Baballonia/Services/Inference/Filters/StopwatchCompat.cs
+new file mode 100644
+index 0000000..fe36b40
+--- /dev/null
++++ b/src/Baballonia/Services/Inference/Filters/StopwatchCompat.cs
+@@ -0,0 +1,19 @@
++using System.Diagnostics;
++
++namespace Baballonia.Services.Inference.Filters;
++
++internal static class StopwatchCompat
++{
++    public static long GetTimestamp() => Stopwatch.GetTimestamp();
++
++    public static float GetElapsedSeconds(ref long previousTimestamp)
++    {
++        var now = Stopwatch.GetTimestamp();
++        var elapsedTicks = now - previousTimestamp;
++        previousTimestamp = now;
++
++        return elapsedTicks > 0
++            ? (float)(elapsedTicks / (double)Stopwatch.Frequency)
++            : 0.0f;
++    }
++}
 diff --git a/src/Baballonia/Services/Inference/FrameCorruptionDetectors.cs b/src/Baballonia/Services/Inference/FrameCorruptionDetectors.cs
 new file mode 100644
 index 0000000..a48be19
@@ -2310,16 +3429,160 @@ index 0000000..c133217
 +{
 +    bool WaitForFrameAfter(long lastSeenSequence, TimeSpan timeout, CancellationToken cancellationToken);
 +}
+diff --git a/src/Baballonia/Services/Inference/ImageCollector.cs b/src/Baballonia/Services/Inference/ImageCollector.cs
+index 9fea32b..6a702e7 100644
+--- a/src/Baballonia/Services/Inference/ImageCollector.cs
++++ b/src/Baballonia/Services/Inference/ImageCollector.cs
+@@ -1,48 +1,87 @@
+-﻿using OpenCvSharp;
+-using System.Collections.Generic;
+-using System.Linq;
++using OpenCvSharp;
++using System;
+ 
+ namespace Baballonia.Services.Inference;
+ 
+-public class ImageCollector : IImageTransformer
++public class ImageCollector : IImageTransformer, IDisposable
+ {
+-    private Queue<Mat> ImageQueue = new();
++    private readonly Mat?[] _history = new Mat[4];
++    private readonly Mat[] _stereoChannels = new Mat[2];
++    private readonly Mat[] _octoChannels = new Mat[8];
++    private int _historyHead;
++    private int _historyCount;
++
+     public Mat? Apply(Mat image)
+     {
+-        Mat[] split = image.Split();
+-        foreach (var mat in split)
++        Mat[] split = Cv2.Split(image);
++        Mat? merged = null;
++        try
+         {
+-            Cv2.EqualizeHist(mat, mat);
+-        }
+-
+-        Mat merged = new Mat();
+-        // swap left and right because inference requires them in that way
+-        Cv2.Merge(split.Reverse().ToArray(), merged);
++            foreach (var mat in split)
++                Cv2.EqualizeHist(mat, mat);
+ 
+-        ImageQueue.Enqueue(merged);
++            merged = new Mat();
++            _stereoChannels[0] = split[1];
++            _stereoChannels[1] = split[0];
++            Cv2.Merge(_stereoChannels, merged);
++        }
++        finally
++        {
++            foreach (var mat in split)
++                mat.Dispose();
++        }
+ 
+-        if (ImageQueue.Count < 5)
++        PushFrame(merged);
++        if (_historyCount < _history.Length)
+             return null;
+ 
+-        var removed = ImageQueue.Dequeue();
+-        removed.Dispose();
+-
+-        // feed the most recent matrix here at the start
+-        var last4 = ImageQueue.Skip(ImageQueue.Count - 4).Take(4).Reverse().ToArray();
++        try
++        {
++            var channelIndex = 0;
++            for (var historyOffset = 0; historyOffset < _history.Length; historyOffset++)
++            {
++                var frameIndex = (_historyHead + _historyCount - 1 - historyOffset + _history.Length) % _history.Length;
++                var frame = _history[frameIndex]!;
++                var splitChannels = Cv2.Split(frame);
++                _octoChannels[channelIndex++] = splitChannels[0];
++                _octoChannels[channelIndex++] = splitChannels[1];
++            }
+ 
+-        var channels = new List<Mat>();
+-        foreach (var m in last4)
++            var octoMatrix = new Mat();
++            Cv2.Merge(_octoChannels, octoMatrix);
++            return octoMatrix;
++        }
++        finally
+         {
+-            Mat[] splitChannels = Cv2.Split(m);
+-            channels.AddRange(splitChannels);
++            for (var i = 0; i < _octoChannels.Length; i++)
++            {
++                _octoChannels[i]?.Dispose();
++                _octoChannels[i] = null!;
++            }
+         }
++    }
+ 
+-        Mat octoMatrix = new Mat();
+-        Cv2.Merge(channels.ToArray(), octoMatrix);
++    private void PushFrame(Mat frame)
++    {
++        if (_historyCount < _history.Length)
++        {
++            var insertIndex = (_historyHead + _historyCount) % _history.Length;
++            _history[insertIndex] = frame;
++            _historyCount++;
++            return;
++        }
+ 
+-        foreach (var channel in channels)
+-            channel.Dispose();
++        _history[_historyHead]?.Dispose();
++        _history[_historyHead] = frame;
++        _historyHead = (_historyHead + 1) % _history.Length;
++    }
+ 
+-        return octoMatrix;
++    public void Dispose()
++    {
++        for (var i = 0; i < _history.Length; i++)
++        {
++            _history[i]?.Dispose();
++            _history[i] = null;
++        }
+     }
+ }
+diff --git a/src/Baballonia/Services/Inference/Transformers/DualImageTransformer.cs b/src/Baballonia/Services/Inference/Transformers/DualImageTransformer.cs
+index 8442055..c0f814e 100644
+--- a/src/Baballonia/Services/Inference/Transformers/DualImageTransformer.cs
++++ b/src/Baballonia/Services/Inference/Transformers/DualImageTransformer.cs
+@@ -33,9 +33,21 @@ public class DualImageTransformer : IImageTransformer
+         }
+ 
+         var combined = new Mat();
+-        Cv2.Merge([leftTransformed, rightTransformed], combined);
+-
+-        return combined;
++        try
++        {
++            Cv2.Merge([leftTransformed, rightTransformed], combined);
++            return combined;
++        }
++        catch
++        {
++            combined.Dispose();
++            throw;
++        }
++        finally
++        {
++            leftTransformed.Dispose();
++            rightTransformed.Dispose();
++        }
+     }
+ 
+ }
 diff --git a/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs b/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs
-index 2c4522e..fbc1c66 100644
+index c89ef3c..fbc1c66 100644
 --- a/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs
 +++ b/src/Baballonia/Services/Inference/VideoSources/DualCameraSource.cs
-@@ -1,4 +1,4 @@
--using Baballonia.Services.Inference.Enums;
-+﻿using Baballonia.Services.Inference.Enums;
- using OpenCvSharp;
- using System;
- 
 @@ -8,18 +8,59 @@ public class DualCameraSource : IVideoSource
  {
      public IVideoSource? LeftCam;
@@ -2638,7 +3901,7 @@ index b3ac6c9..38f436b 100644
      }
  }
 diff --git a/src/Baballonia/Services/MainStandalone.cs b/src/Baballonia/Services/MainStandalone.cs
-index a3188a1..57b213a 100644
+index a3188a1..48cd4c9 100644
 --- a/src/Baballonia/Services/MainStandalone.cs
 +++ b/src/Baballonia/Services/MainStandalone.cs
 @@ -1,6 +1,7 @@
@@ -2663,6 +3926,7 @@ index a3188a1..57b213a 100644
          _logger.LogDebug("Starting OSC update loop...");
          return Task.CompletedTask;
      }
+-}
 +
 +    private void TryElevateProcessPriority()
 +    {
@@ -2672,7 +3936,7 @@ index a3188a1..57b213a 100644
 +        try
 +        {
 +            using var currentProcess = Process.GetCurrentProcess();
-+            currentProcess.PriorityClass = ProcessPriorityClass.Normal;
++            currentProcess.PriorityClass = ProcessPriorityClass.AboveNormal;
 +            _logger.LogDebug("Set Baballonia process priority to {PriorityClass}", currentProcess.PriorityClass);
 +        }
 +        catch (Exception ex)
@@ -2680,7 +3944,8 @@ index a3188a1..57b213a 100644
 +            _logger.LogDebug(ex, "Failed to elevate Baballonia process priority");
 +        }
 +    }
- }
++}
+\ No newline at end of file
 diff --git a/src/Baballonia/Services/OscSendService.cs b/src/Baballonia/Services/OscSendService.cs
 index 5486e65..00be572 100644
 --- a/src/Baballonia/Services/OscSendService.cs
@@ -3129,7 +4394,7 @@ index ff56038..c329f7f 100644
  }
 diff --git a/src/Baballonia/Services/ProcessAffinityService.cs b/src/Baballonia/Services/ProcessAffinityService.cs
 new file mode 100644
-index 0000000..b8fe750
+index 0000000..bb2ed69
 --- /dev/null
 +++ b/src/Baballonia/Services/ProcessAffinityService.cs
 @@ -0,0 +1,121 @@
@@ -3145,7 +4410,7 @@ index 0000000..b8fe750
 +
 +public sealed class ProcessAffinityService : BackgroundService
 +{
-+    private const long DefaultNonPrimaryThreadsMask = 0x3FFC;
++    private const long DefaultLastFourThreadsMask = 0xF000;
 +    private static readonly string[] VrcftProcessNames =
 +    [
 +        "VRCFaceTracking",
@@ -3214,7 +4479,7 @@ index 0000000..b8fe750
 +
 +        var processorCount = Environment.ProcessorCount;
 +        if (processorCount == 16)
-+            return DefaultNonPrimaryThreadsMask;
++            return DefaultLastFourThreadsMask;
 +
 +        if (processorCount >= 8)
 +        {
@@ -3255,7 +4520,7 @@ index 0000000..b8fe750
 +    }
 +}
 diff --git a/src/Baballonia/Services/ProcessingLoopService.cs b/src/Baballonia/Services/ProcessingLoopService.cs
-index bcb8930..48a3dbb 100644
+index bcb8930..26f5248 100644
 --- a/src/Baballonia/Services/ProcessingLoopService.cs
 +++ b/src/Baballonia/Services/ProcessingLoopService.cs
 @@ -1,16 +1,23 @@
@@ -3274,7 +4539,7 @@ index bcb8930..48a3dbb 100644
  public class ProcessingLoopService : IDisposable
  {
 -    public record struct Expressions(float[]? FaceExpression, float[]? EyeExpression);
-+    private static readonly TimeSpan ActiveLoopCadence = TimeSpan.FromMilliseconds(11);
++    private static readonly TimeSpan ActiveLoopCadence = TimeSpan.FromMilliseconds(1);
 +    private static readonly TimeSpan IdleLoopCadence = TimeSpan.FromMilliseconds(20);
 +    private static readonly TimeSpan FrameDrivenWaitTimeout = TimeSpan.FromMilliseconds(20);
  
@@ -3411,7 +4676,7 @@ index bcb8930..48a3dbb 100644
 -            var faceExpression = _faceProcessingPipeline.RunUpdate();
 -            if (faceExpression != null)
 -                expressions.FaceExpression = faceExpression;
-+            Thread.CurrentThread.Priority = ThreadPriority.Normal;
++            Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
          }
 -        catch (Exception ex)
 +        catch
@@ -3618,93 +4883,85 @@ index 0000000..63be3b7
 +        }
 +    }
 +}
-diff --git a/src/Baballonia/ViewModels/MainViewModel.cs b/src/Baballonia/ViewModels/MainViewModel.cs
-index 952157f..c2959a5 100644
---- a/src/Baballonia/ViewModels/MainViewModel.cs
-+++ b/src/Baballonia/ViewModels/MainViewModel.cs
-@@ -1,5 +1,4 @@
- ﻿using Avalonia.Controls;
--using Baballonia.Assets;
- using Baballonia.Models;
- using Baballonia.Services;
- using Baballonia.ViewModels.SplitViewPane;
-@@ -37,22 +36,22 @@ public partial class MainViewModel : ViewModelBase
+diff --git a/src/Baballonia/Utils/Utils.cs b/src/Baballonia/Utils/Utils.cs
+index 3e88f32..9e51ea8 100644
+--- a/src/Baballonia/Utils/Utils.cs
++++ b/src/Baballonia/Utils/Utils.cs
+@@ -12,6 +12,9 @@ namespace Baballonia;
  
-     private readonly List<ListItemTemplate> _desktopTemplates =
-     [
--        new(typeof(HomePageViewModel), "HomeRegular", Resources.Home_Title_Header), // Home
--        new(typeof(CalibrationViewModel), "EditRegular", Resources.Calibration_Title_Header), // Calibration
--        new(typeof(FirmwareViewModel), "DeveloperBoardRegular", Resources.Firmware_Title_Header), // Firmware
--        new(typeof(VrcViewModel), "CommentRegular", "VRChat"), // VRChat. No translation :P
--        new(typeof(OutputPageViewModel), "TextFirstLineRegular", Resources.Output_Title_Header), // Output
--        new(typeof(AppSettingsViewModel), "SettingsRegular", Resources.Settings_Title_Header), // Settings
--        new(typeof(AboutPageViewModel), "InfoRegular", Resources.About_Title_Header), // About
-+        new(typeof(HomePageViewModel), "HomeRegular", "Home"),
-+        new(typeof(CalibrationViewModel), "EditRegular", "Calibration"),
-+        new(typeof(FirmwareViewModel), "DeveloperBoardRegular", "Firmware"),
-+        new(typeof(VrcViewModel), "CommentRegular", "VRChat"),
-+        new(typeof(OutputPageViewModel), "TextFirstLineRegular", "Output"),
-+        new(typeof(AppSettingsViewModel), "SettingsRegular", "Settings"),
-+        new(typeof(AboutPageViewModel), "InfoRegular", "About"),
-     ];
+ public static class Utils
+ {
++    private const string AppDataRootEnvVar = "BABALLONIA_APPDATA_ROOT";
++    private const string DocumentsRootEnvVar = "BABALLONIA_DOCUMENTS_ROOT";
++    private const string VrcftLibsDirEnvVar = "BABALLONIA_VRCFT_LIBS_DIR";
+     public const int EyeRawExpressions = 6;
+     public const int FaceRawExpressions = 45;
+     public const int FramesForEyeInference = 4;
+@@ -49,24 +52,35 @@ public static class Utils
  
-     private readonly List<ListItemTemplate> _mobileTemplates =
-     [
--        new(typeof(HomePageViewModel), "HomeRegular", Resources.Home_Title_Header), // Home
--        new(typeof(CalibrationViewModel), "EditRegular", Resources.Calibration_Title_Header), // Calibration
--        new(typeof(OutputPageViewModel), "TextFirstLineRegular", Resources.Output_Title_Header), // Output
--        new(typeof(AppSettingsViewModel), "SettingsRegular", Resources.Settings_Title_Header), // Settings
--        new(typeof(AboutPageViewModel), "InfoRegular", Resources.About_Title_Header), // About
-+        new(typeof(HomePageViewModel), "HomeRegular", "Home"),
-+        new(typeof(CalibrationViewModel), "EditRegular", "Calibration"),
-+        new(typeof(OutputPageViewModel), "TextFirstLineRegular", "Output"),
-+        new(typeof(AppSettingsViewModel), "SettingsRegular", "Settings"),
-+        new(typeof(AboutPageViewModel), "InfoRegular", "About"),
-     ];
+     public static readonly bool HasAdmin = OperatingSystem.IsWindows() && new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
  
-     public MainViewModel() : this(new WeakReferenceMessenger()) { }
+-    public static readonly string UserAccessibleDataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ProjectBabble");
++    private static readonly string? PersistentDataDirectoryOverride = GetOverridePath(AppDataRootEnvVar);
++    private static readonly string? UserAccessibleDataDirectoryOverride = GetOverridePath(DocumentsRootEnvVar);
++    private static readonly string? VrcftLibsDirectoryOverride = GetOverridePath(VrcftLibsDirEnvVar);
++
++    public static readonly string UserAccessibleDataDirectory = UserAccessibleDataDirectoryOverride ??
++                                                               Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ProjectBabble");
+ 
+     public static readonly string PersistentDataDirectory = IsSupportedDesktopOS
+-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ProjectBabble")
++        ? PersistentDataDirectoryOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ProjectBabble")
+         : AppContext.BaseDirectory;
+ 
+     public static readonly string ModelsDirectory = IsSupportedDesktopOS
+-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ProjectBabble", "Models")
++        ? Path.Combine(PersistentDataDirectory, "Models")
+         : AppContext.BaseDirectory;
+ 
+     public static readonly string ModelDataDirectory = IsSupportedDesktopOS
+-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ProjectBabble", "ModelData")
++        ? Path.Combine(PersistentDataDirectory, "ModelData")
+         : AppContext.BaseDirectory;
+ 
+-    public static readonly string VrcftLibsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
++    public static readonly string VrcftLibsDirectory = VrcftLibsDirectoryOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+         "VRCFaceTracking",
+         "CustomLibs");
+ 
++    private static string? GetOverridePath(string variableName)
++    {
++        var overridePath = Environment.GetEnvironmentVariable(variableName);
++        return string.IsNullOrWhiteSpace(overridePath) ? null : overridePath;
++    }
++
+     public static void ExtractEmbeddedResource(Assembly assembly, string resourceName, string file, bool overwrite = false)
+     {
+         // Extract the embedded model if it isn't already present
 diff --git a/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs b/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs
-index 2785830..f5cb776 100644
+index 93add63..f5cb776 100644
 --- a/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs
 +++ b/src/Baballonia/ViewModels/SplitViewPane/AppSettingsViewModel.cs
-@@ -1,20 +1,31 @@
--using Avalonia;
--using Avalonia.Media;
--using Avalonia.Styling;
--using Baballonia.Assets;
+@@ -1,15 +1,18 @@
  using Baballonia.Contracts;
  using Baballonia.Services;
  using Baballonia.Services.Inference;
 +using Baballonia.Services.Inference.Filters;
  using CommunityToolkit.Mvvm.ComponentModel;
-+using CommunityToolkit.Mvvm.DependencyInjection;
+ using CommunityToolkit.Mvvm.DependencyInjection;
  using Microsoft.Extensions.Logging;
  using OscCore;
  using System;
--using System.Collections.ObjectModel;
-+using System.Collections.Generic;
+ using System.Collections.Generic;
 +using System.Threading.Tasks;
-+using Avalonia;
-+using Avalonia.Media;
-+using Avalonia.Styling;
+ using Avalonia;
+ using Avalonia.Media;
+ using Avalonia.Styling;
 +using System.Linq;
  
  namespace Baballonia.ViewModels.SplitViewPane;
  
- public partial class AppSettingsViewModel : ViewModelBase
- {
-+    public IOscTarget OscTarget { get; }
-+    public GithubService GithubService { get; private set;}
-+    public ParameterSenderService ParameterSenderService { get; private set;}
-+    private OpenVRService OpenVrService { get; } = Ioc.Default.GetService<OpenVRService>();
-+    private ILocalSettingsService SettingsService { get; }
-+
-+    public string MachineID => _identityService.GetUniqueUserId();
-+
-     [ObservableProperty]
-     [property: SavedSetting("AppSettings_RecalibrateAddress", "/avatar/parameters/etvr_recalibrate")]
-     private string _recalibrateAddress;
-@@ -36,6 +47,10 @@ public partial class AppSettingsViewModel : ViewModelBase
+@@ -44,6 +47,10 @@ public partial class AppSettingsViewModel : ViewModelBase
      [property: SavedSetting("AppSettings_OneEuroEnabled", true)]
      private bool _oneEuroMinEnabled;
  
@@ -3715,131 +4972,47 @@ index 2785830..f5cb776 100644
      [ObservableProperty]
      [property: SavedSetting("AppSettings_OneEuroMinFreqCutoff", 0.5f)]
      private float _oneEuroMinFreqCutoff;
-@@ -53,7 +68,7 @@ public partial class AppSettingsViewModel : ViewModelBase
-     private bool _useGPU;
- 
-     [ObservableProperty]
--    [property: SavedSetting("AppSettings_SteamVRAutoStart", true)]
-+    [property: SavedSetting("AppSettings_SteamvrAutoStart", true)]
-     private bool _steamvrAutoStart;
- 
-     [ObservableProperty]
-@@ -65,16 +80,9 @@ public partial class AppSettingsViewModel : ViewModelBase
-     private bool _shareEyeData;
- 
-     [ObservableProperty]
-+    [property: SavedSetting("AppSettings_LogLevel", "Debug")]
-     private string _logLevel;
- 
--    public ObservableCollection<string> LowestLogLevel { get; } =
--    [
--        Resources.Settings_LogLevel_Debug,
--        Resources.Settings_LogLevel_Information,
--        Resources.Settings_LogLevel_Warning,
--        Resources.Settings_LogLevel_Error
--    ];
--
-     [ObservableProperty]
-     [property: SavedSetting("AppSettings_AdvancedOptions", false)]
-     private bool _advancedOptions;
-@@ -83,46 +91,63 @@ public partial class AppSettingsViewModel : ViewModelBase
+@@ -84,6 +91,18 @@ public partial class AppSettingsViewModel : ViewModelBase
      [property: SavedSetting("AppSettings_StabilizeEyes", true)]
      private bool _stabilizeEyes;
  
--    [ObservableProperty] private bool _onboardingEnabled;
 +    [ObservableProperty]
 +    [property: SavedSetting("AppSettings_CorruptionDetector", CorruptionDetectorModes.StockRow)]
 +    private string _corruptionDetector;
- 
--    public string MachineID => _identityService.GetUniqueUserId();
++
 +    [ObservableProperty]
 +    [property: SavedSetting("AppSettings_BigeyeWindowsBackend", "Stable")]
 +    private string _bigeyeWindowsBackend;
- 
--    public IOscTarget OscTarget { get; }
++
 +    [ObservableProperty]
 +    [property: SavedSetting("AppSettings_RecordEyeTrace", false)]
 +    private bool _recordEyeTrace;
 +
-+    public List<string> LowestLogLevel { get; } =
-+    [
-+        "Debug",
-+        "Information",
-+        "Warning",
-+        "Error"
-+    ];
-+
+     public List<string> LowestLogLevel { get; } =
+     [
+         "Debug",
+@@ -92,6 +111,10 @@ public partial class AppSettingsViewModel : ViewModelBase
+         "Error"
+     ];
+ 
 +    public List<string> CorruptionDetectorOptions { get; } = CorruptionDetectorModes.All.ToList();
 +    public List<string> BigeyeWindowsBackendOptions { get; } = ["Stable", "Low Latency"];
 +    public List<string> EyeSmoothingFilterOptions { get; } = EyeSmoothingModes.All.ToList();
 +
-+    [ObservableProperty] private bool _onboardingEnabled;
+     [ObservableProperty] private bool _onboardingEnabled;
  
-+    private readonly ILogger<AppSettingsViewModel> _logger;
-     private readonly FacePipelineManager _facePipelineManager;
-     private readonly EyePipelineManager _eyePipelineManager;
-     private readonly IIdentityService _identityService;
--    private readonly ILogger<AppSettingsViewModel> _logger;
--    private readonly ILocalSettingsService _localSettingsService;
--    private readonly OpenVRService _openVrService;
- 
-     public AppSettingsViewModel(
-         FacePipelineManager facePipelineManager,
-         EyePipelineManager eyePipelineManager,
--        ILocalSettingsService localSettingsService,
--        IOscTarget oscTarget,
-         IIdentityService identityService,
--        GithubService githubService,
--        ParameterSenderService parameterSenderService,
--        ILogger<AppSettingsViewModel> logger,
-         IThemeSelectorService themeSelectorService)
-     {
--        OscTarget = oscTarget;
--        _localSettingsService = localSettingsService;
-         _facePipelineManager = facePipelineManager;
-         _eyePipelineManager = eyePipelineManager;
-         _identityService = identityService;
--        _logger = logger;
--        _localSettingsService.Load(this);
- 
--        LogLevel = _localSettingsService.ReadSetting("AppSettings_LogLevel", "Debug");
-+        // General/Calibration Settings
-+        OscTarget = Ioc.Default.GetService<IOscTarget>()!;
-+        GithubService = Ioc.Default.GetService<GithubService>()!;
-+        SettingsService = Ioc.Default.GetService<ILocalSettingsService>()!;
-+        _logger = Ioc.Default.GetService<ILogger<AppSettingsViewModel>>()!;
-+        SettingsService.Load(this);
+     private readonly ILogger<AppSettingsViewModel> _logger;
+@@ -115,6 +138,9 @@ public partial class AppSettingsViewModel : ViewModelBase
+         SettingsService = Ioc.Default.GetService<ILocalSettingsService>()!;
+         _logger = Ioc.Default.GetService<ILogger<AppSettingsViewModel>>()!;
+         SettingsService.Load(this);
 +        CorruptionDetector = CorruptionDetectorModes.Normalize(CorruptionDetector);
 +        BigeyeWindowsBackend = NormalizeBigeyeWindowsBackend(BigeyeWindowsBackend);
 +        EyeSmoothingFilter = NormalizeEyeSmoothingFilter(EyeSmoothingFilter, OneEuroMinEnabled);
  
          // Handle edge case where OSC port is used and the system freaks out
          if (OscTarget.OutPort == 0)
-         {
-             const int port = 8888;
-             OscTarget.OutPort = port;
--            _localSettingsService.SaveSetting("OSCOutPort", port);
-+            SettingsService.SaveSetting("OSCOutPort", port);
-         }
- 
-         // Edge case: Update the OscPrefix Background color if and only if
-@@ -133,11 +158,14 @@ public partial class AppSettingsViewModel : ViewModelBase
-                 SetOscPrefixBackgroundColor(variant);
-         };
- 
-+        // Risky Settings
-+        ParameterSenderService = Ioc.Default.GetService<ParameterSenderService>()!;
-+
-         OnboardingEnabled = Utils.IsSupportedDesktopOS;
- 
-         PropertyChanged += (_, p) =>
-         {
--            _localSettingsService.Save(this);
-+            SettingsService.Save(this);
-             _facePipelineManager.LoadFilter();
-             _eyePipelineManager.LoadFilter();
- 
-@@ -145,24 +173,63 @@ public partial class AppSettingsViewModel : ViewModelBase
+@@ -147,9 +173,65 @@ public partial class AppSettingsViewModel : ViewModelBase
              {
                  _eyePipelineManager.LoadEyeStabilization();
              }
@@ -3848,14 +5021,11 @@ index 2785830..f5cb776 100644
 +            {
 +                _eyePipelineManager.LoadCorruptionDetector();
 +            }
-         };
-     }
- 
--    partial void OnLogLevelChanged(string value)
++        };
++    }
++
 +    async partial void OnBigeyeWindowsBackendChanged(string value)
-     {
--        var prev = _localSettingsService.ReadSetting("AppSettings_LogLevel", value);
--        if (prev == value)
++    {
 +        var normalized = NormalizeBigeyeWindowsBackend(value);
 +        if (normalized != value)
 +        {
@@ -3880,10 +5050,9 @@ index 2785830..f5cb776 100644
 +        if (normalized != value)
 +        {
 +            EyeSmoothingFilter = normalized;
-             return;
++            return;
 +        }
- 
--        var newLogLevel = value switch
++
 +        OneEuroMinEnabled = normalized != EyeSmoothingModes.Off;
 +        SettingsService.SaveSetting("AppSettings_EyeSmoothingFilter", normalized);
 +    }
@@ -3891,71 +5060,30 @@ index 2785830..f5cb776 100644
 +    private static string NormalizeBigeyeWindowsBackend(string? value)
 +    {
 +        return value?.Trim().ToLowerInvariant() switch
-         {
--            var v when v == Resources.Settings_LogLevel_Debug => "Debug",
--            var v when v == Resources.Settings_LogLevel_Information => "Information",
--            var v when v == Resources.Settings_LogLevel_Warning => "Warning",
--            var v when v == Resources.Settings_LogLevel_Error => "Error",
--            _ => "Debug"
++        {
 +            "low latency" => "Low Latency",
 +            "dshow" => "Low Latency",
 +            _ => "Stable"
          };
--        _localSettingsService.SaveSetting("AppSettings_LogLevel", newLogLevel);
-+    }
-+
+     }
+ 
 +    private static string NormalizeEyeSmoothingFilter(string? value, bool fallbackEnabled)
 +    {
 +        if (string.IsNullOrWhiteSpace(value))
 +            return fallbackEnabled ? EyeSmoothingModes.SavitzkyGolayFir : EyeSmoothingModes.Off;
 +
 +        return EyeSmoothingModes.Normalize(value);
-     }
- 
++    }
++
      partial void OnOscPrefixChanged(string value)
-@@ -174,7 +241,7 @@ public partial class AppSettingsViewModel : ViewModelBase
- 
-         if (_isOscPrefixValid)
-         {
--            _localSettingsService.SaveSetting("AppSettings_OSCPrefix", value);
-+            SettingsService.SaveSetting("AppSettings_OSCPrefix", value);
-             SetOscPrefixBackgroundColor(Application.Current!.ActualThemeVariant);
-             return;
-         }
-@@ -195,14 +262,14 @@ public partial class AppSettingsViewModel : ViewModelBase
- 
-     partial void OnSteamvrAutoStartChanged(bool value)
      {
--        var readValue = _localSettingsService.ReadSetting("AppSettings_SteamVRAutoStart", value);
--        if (readValue == value || _openVrService == null)
-+        var readValue = SettingsService.ReadSetting("AppSettings_SteamvrAutoStart", value);
-+        if (readValue == value || OpenVrService == null)
-             return;
- 
+         // 1) A valid OSC prefix is also a valid message itself
+@@ -204,8 +286,10 @@ public partial class AppSettingsViewModel : ViewModelBase
          try
          {
--            _openVrService.SteamvrAutoStart = value;
--            _localSettingsService.SaveSetting("AppSettings_SteamVRAutoStart", value);
-+           OpenVrService.SteamvrAutoStart = value;
-+           SettingsService.SaveSetting("AppSettings_SteamvrAutoStart", value);
-         }
-         catch (Exception e)
-         {
-@@ -212,15 +279,17 @@ public partial class AppSettingsViewModel : ViewModelBase
- 
-     async partial void OnUseGPUChanged(bool value)
-     {
--        var prev = _localSettingsService.ReadSetting("AppSettings_UseGPU", value);
-+        var prev = SettingsService.ReadSetting("AppSettings_UseGPU", value);
-         if (prev == value)
-             return;
- 
-         try
-         {
--            _localSettingsService.SaveSetting("AppSettings_UseGPU", value);
+             SettingsService.SaveSetting("AppSettings_UseGPU", value);
 -            var loadFace = _eyePipelineManager.LoadInferenceAsync();
 -            var loadEye = _facePipelineManager.LoadInferenceAsync();
-+            SettingsService.SaveSetting("AppSettings_UseGPU", value);
 +            var loadEye = _eyePipelineManager.LoadInferenceAsync();
 +            var loadFace = _facePipelineManager.HasLoadedInference
 +                ? _facePipelineManager.LoadInferenceAsync()
@@ -3963,3 +5091,779 @@ index 2785830..f5cb776 100644
  
              await loadEye;
              await loadFace;
+diff --git a/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs b/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs
+index 062df52..ff1f586 100644
+--- a/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs
++++ b/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs
+@@ -1,8 +1,10 @@
+ using Avalonia;
+ using Avalonia.Controls;
++using Avalonia.Controls.ApplicationLifetimes;
+ using Avalonia.Media;
+ using Avalonia.Media.Imaging;
+ using Avalonia.Platform;
++using Avalonia.Threading;
+ using Baballonia.Contracts;
+ using Baballonia.Helpers;
+ using Baballonia.Services;
+@@ -19,6 +21,7 @@ using System;
+ using System.Collections.ObjectModel;
+ using System.ComponentModel;
+ using System.Linq;
++using System.Threading;
+ using System.Threading.Tasks;
+ using Buffer = System.Buffer;
+ using Rect = Avalonia.Rect;
+@@ -58,20 +61,31 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+         [ObservableProperty] private bool _captureMethodVisible = false;
+         public ObservableCollection<string> Suggestions { get; set; } = [];
+         public ObservableCollection<string> CaptureMethods { get; set; } = [];
+-
++        private readonly object _previewFrameLock = new();
++        private Mat? _queuedPreviewFrame;
++        private int _previewUpdateScheduled;
++        private long _previewFramesReceived;
++        private long _previewFramesQueued;
++        private long _previewFramesDropped;
++        private long _previewFramesRendered;
++        private long _lastPreviewLogTick;
++        private int _previewEnabled = 1;
+         private readonly ILocalSettingsService _localSettingsService;
+         private readonly IPlatformConnector _platformConnector;
+         private readonly IDeviceEnumerator _deviceEnumerator;
++        private readonly ILogger<HomePageViewModel> _logger;
+ 
+ 
+         public CameraControllerModel(ILocalSettingsService localSettingsService, IPlatformConnector platformConnector,
+             IDeviceEnumerator deviceEnumerator,
++            ILogger<HomePageViewModel> logger,
+             string name, string[] cameras,
+             Camera camera)
+         {
+             _localSettingsService = localSettingsService;
+             _platformConnector = platformConnector;
+             _deviceEnumerator = deviceEnumerator;
++            _logger = logger;
+ 
+             Name = name;
+             Camera = camera;
+@@ -132,7 +146,11 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+                 foreach (var match in availableCaptureFactories)
+                     CaptureMethods.Add(match.GetProviderName());
+ 
+-                SelectedCaptureMethod = availableCaptureFactories.First().GetProviderName();
++                var preferredCapture = _localSettingsService.ReadSetting<string>("LastOpenedPreferredCapture" + Name);
++                if (preferredCapture == "Default" || string.IsNullOrEmpty(preferredCapture) || !CaptureMethods.Contains(preferredCapture))
++                    SelectedCaptureMethod = Assets.Resources.Home_Backend_Default;
++                else
++                    SelectedCaptureMethod = preferredCapture;
+             }
+             else
+             {
+@@ -183,138 +201,257 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+ 
+         public void FaceNewImageUpdateEventHandler(FacePipelineEvents.NewFrameEvent e)
+         {
++            if (!ShouldProcessPreview())
++                return;
++
+             if (IsCropMode)
+-                FaceImageUpdateHandler(e.image);
++                QueueFacePreview(e.image);
+         }
+ 
+         public void FaceNewTransformedUpdateEventHandler(FacePipelineEvents.NewTransformedFrameEvent e)
+         {
++            if (!ShouldProcessPreview())
++                return;
++
+             if (!IsCropMode)
+-                FaceImageUpdateHandler(e.image);
++                QueueFacePreview(e.image);
++        }
++
++        public void EyeNewImageUpdateEventHandler(EyePipelineEvents.NewFrameEvent e)
++        {
++            if (!ShouldProcessPreview())
++                return;
++
++            QueueEyePreview(e.image);
++        }
++
++        public void EyeNewTransformedUpdateEventHandler(EyePipelineEvents.NewTransformedFrameEvent e)
++        {
++            // Eye preview stays on the live raw feed so the panel reflects actual camera motion.
+         }
+ 
+-        private void FaceImageUpdateHandler(Mat image)
++        private void QueueFacePreview(Mat image)
+         {
++            Interlocked.Increment(ref _previewFramesReceived);
+             if (image == null)
+             {
+-                IsCameraRunning = false;
+-                StartButtonEnabled = true;
+-                StopButtonEnabled = false;
+-                Bitmap = null;
++                Dispatcher.UIThread.Post(ClearPreview);
+                 return;
+             }
+ 
+             if (!IsCameraRunning)
+                 return;
+ 
+-            StartButtonEnabled = false;
+-            StopButtonEnabled = true;
+-
++            var (width, height, channels) = GetFrameInfo(image);
+             if (Camera == Camera.Face)
+-            {
+-                UpdateBitmap(image);
+-            }
+-        }
++                QueuePreviewFrame(image.Clone());
+ 
+-        public void EyeNewImageUpdateEventHandler(EyePipelineEvents.NewFrameEvent e)
+-        {
+-            if (IsCropMode)
+-                EyeImageUpdateHandler(e.image);
++            LogPreviewState("received-face", width, height, channels);
+         }
+ 
+-        public void EyeNewTransformedUpdateEventHandler(EyePipelineEvents.NewTransformedFrameEvent e)
+-        {
+-            if (!IsCropMode)
+-                EyeImageUpdateHandler(e.image);
+-        }
+-
+-        private void EyeImageUpdateHandler(Mat image)
++        private void QueueEyePreview(Mat image)
+         {
++            Interlocked.Increment(ref _previewFramesReceived);
+             if (image == null)
+             {
+-                IsCameraRunning = false;
+-                StartButtonEnabled = true;
+-                StopButtonEnabled = false;
+-                Bitmap = null;
++                Dispatcher.UIThread.Post(ClearPreview);
+                 return;
+             }
+ 
+             if (!IsCameraRunning)
+                 return;
+ 
++            var (sourceWidth, sourceHeight, sourceChannels) = GetFrameInfo(image);
++            Mat? preview = null;
+ 
+-            var channels = image.Channels();
+-            if (channels == 1)
++            try
+             {
+-                var width = image.Width;
+-                var height = image.Height;
+-                switch (Camera)
++                var inputChannels = image.Channels();
++                if (inputChannels == 1)
+                 {
+-                    case Camera.Left:
+-                    {
+-                        var leftHalf = new OpenCvSharp.Rect(0, 0, width / 2, height);
+-                        var leftRoi = new Mat(image, leftHalf);
+-
+-
+-                        UpdateBitmap(leftRoi);
+-                        break;
+-                    }
+-                    case Camera.Right:
++                    var imageWidth = image.Width;
++                    var imageHeight = image.Height;
++                    switch (Camera)
+                     {
+-                        var rightHalf = new OpenCvSharp.Rect(width / 2, 0, width / 2, height);
+-                        var rightRoi = new Mat(image, rightHalf);
+-                        UpdateBitmap(rightRoi);
+-                        break;
++                        case Camera.Left:
++                        {
++                            var leftHalf = new OpenCvSharp.Rect(0, 0, imageWidth / 2, imageHeight);
++                            using var leftRoi = new Mat(image, leftHalf);
++                            preview = leftRoi.Clone();
++                            break;
++                        }
++                        case Camera.Right:
++                        {
++                            var rightHalf = new OpenCvSharp.Rect(imageWidth / 2, 0, imageWidth / 2, imageHeight);
++                            using var rightRoi = new Mat(image, rightHalf);
++                            preview = rightRoi.Clone();
++                            break;
++                        }
+                     }
+                 }
++                else if (inputChannels == 2)
++                {
++                    preview = new Mat();
++                    Cv2.ExtractChannel(image, preview, Camera == Camera.Left ? 0 : 1);
++                }
++                else
++                {
++                    preview = image.Clone();
++                }
++
++                if (preview != null)
++                {
++                    QueuePreviewFrame(preview);
++                    preview = null;
++                }
++
++                LogPreviewState("received-eye", sourceWidth, sourceHeight, sourceChannels);
+             }
+-            else if (channels == 2)
++            finally
++            {
++                preview?.Dispose();
++            }
++        }
++
++        private void ClearPreview()
++        {
++            DisposeQueuedPreview();
++            IsCameraRunning = false;
++            StartButtonEnabled = true;
++            StopButtonEnabled = false;
++            Bitmap = null;
++            LogPreviewState("cleared", force: true);
++        }
++
++        private void QueuePreviewFrame(Mat preview)
++        {
++            if (!ShouldProcessPreview())
+             {
+-                var images = image.Split();
++                preview.Dispose();
++                return;
++            }
++
++            Mat? displacedFrame;
++            var shouldSchedule = false;
++            var (width, height, channels) = GetFrameInfo(preview);
+ 
+-                if (Camera == Camera.Left)
+-                    UpdateBitmap(images[0]);
+-                else if (Camera == Camera.Right)
+-                    UpdateBitmap(images[1]);
++            lock (_previewFrameLock)
++            {
++                displacedFrame = _queuedPreviewFrame;
++                _queuedPreviewFrame = preview;
++                shouldSchedule = Interlocked.Exchange(ref _previewUpdateScheduled, 1) == 0;
+             }
++
++            Interlocked.Increment(ref _previewFramesQueued);
++            if (displacedFrame != null)
++                Interlocked.Increment(ref _previewFramesDropped);
++            displacedFrame?.Dispose();
++
++            if (shouldSchedule)
++                Dispatcher.UIThread.Post(ProcessQueuedPreviewFrame, DispatcherPriority.Background);
++
++            LogPreviewState("queued", width, height, channels);
+         }
+ 
+-        void UpdateBitmap(Mat image)
++        private void ProcessQueuedPreviewFrame()
+         {
+-            if (_bitmap is null ||
+-                _bitmap.PixelSize.Width != image.Width ||
+-                _bitmap.PixelSize.Height != image.Height)
++            Mat? frame;
++
++            lock (_previewFrameLock)
+             {
+-                _bitmap = new WriteableBitmap(
+-                    new PixelSize(image.Width, image.Height),
+-                    new Vector(96, 96),
+-                    image.Channels() == 3 ? PixelFormats.Bgr24 : PixelFormats.Gray8,
+-                    AlphaFormat.Opaque);
++                frame = _queuedPreviewFrame;
++                _queuedPreviewFrame = null;
+             }
+ 
+-            CropManager.MaxSize.Height = _bitmap.PixelSize.Height;
+-            CropManager.MaxSize.Width = _bitmap.PixelSize.Width;
++            Interlocked.Exchange(ref _previewUpdateScheduled, 0);
++            if (frame == null)
++                return;
+ 
+-            if (!image.IsContinuous()) image = image.Clone();
++            try
++            {
++                if (!IsCameraRunning || !ShouldProcessPreview())
++                    return;
++
++                var (width, height, channels) = GetFrameInfo(frame);
++                StartButtonEnabled = false;
++                StopButtonEnabled = true;
++                UpdateBitmap(frame);
++                Interlocked.Increment(ref _previewFramesRendered);
++                LogPreviewState("rendered", width, height, channels);
++            }
++            finally
++            {
++                frame.Dispose();
++            }
++        }
++
++        private void DisposeQueuedPreview()
++        {
++            Mat? queuedFrame = null;
++
++            lock (_previewFrameLock)
++            {
++                queuedFrame = _queuedPreviewFrame;
++                _queuedPreviewFrame = null;
++                Interlocked.Exchange(ref _previewUpdateScheduled, 0);
++            }
++
++            queuedFrame?.Dispose();
++        }
++
++        private bool ShouldProcessPreview()
++        {
++            if (IsCropMode)
++                return true;
++
++            if (Camera == Camera.Left || Camera == Camera.Right)
++                return false;
++
++            return Interlocked.CompareExchange(ref _previewEnabled, 0, 0) != 0;
++        }
++
++        void UpdateBitmap(Mat image)
++        {
++            var newBitmap = new WriteableBitmap(
++                new PixelSize(image.Width, image.Height),
++                new Vector(96, 96),
++                image.Channels() == 3 ? PixelFormats.Bgr24 : PixelFormats.Gray8,
++                AlphaFormat.Opaque);
++
++            CropManager.MaxSize.Height = newBitmap.PixelSize.Height;
++            CropManager.MaxSize.Width = newBitmap.PixelSize.Width;
++
++            Mat? continuousImage = null;
++            var copySource = image;
++            if (!image.IsContinuous())
++            {
++                continuousImage = image.Clone();
++                copySource = continuousImage;
++            }
+ 
+             // scope for "using" a lock hehe...
++            try
+             {
+-                using var frameBuffer = _bitmap.Lock();
++                using var frameBuffer = newBitmap.Lock();
+ 
+-                var srcPtr = image.Data;
++                var srcPtr = copySource.Data;
+                 var destPtr = frameBuffer.Address;
+-                var size = image.Rows * image.Cols * image.ElemSize();
++                var size = copySource.Rows * copySource.Cols * copySource.ElemSize();
+ 
+                 unsafe
+                 {
+                     Buffer.MemoryCopy(srcPtr.ToPointer(), destPtr.ToPointer(), size, size);
+                 }
+             }
++            finally
++            {
++                continuousImage?.Dispose();
++            }
+ 
++            var previousBitmap = Bitmap;
++            Bitmap = newBitmap;
++            previousBitmap?.Dispose();
+             IsCameraRunning = true;
+-            var tmp = Bitmap;
+-            Bitmap = null;
+-            Bitmap = tmp;
+         }
+ 
+         partial void OnFlipHorizontallyChanged(bool value)
+@@ -371,6 +508,57 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+             CropManager.SelectEntireFrame(Camera);
+             OnCropUpdated();
+         }
++
++        public void Cleanup()
++        {
++            DisposeQueuedPreview();
++        }
++
++        public void SetPreviewEnabled(bool enabled)
++        {
++            Interlocked.Exchange(ref _previewEnabled, enabled ? 1 : 0);
++            if (!enabled)
++                Dispatcher.UIThread.Post(ClearPreview, DispatcherPriority.Background);
++        }
++
++        private static (int width, int height, int channels) GetFrameInfo(Mat? frame)
++        {
++            if (frame == null)
++                return (0, 0, 0);
++
++            try
++            {
++                return (frame.Width, frame.Height, frame.Channels());
++            }
++            catch
++            {
++                return (0, 0, 0);
++            }
++        }
++
++        private void LogPreviewState(string stage, int width = 0, int height = 0, int channels = 0, bool force = false)
++        {
++            var nowTick = Environment.TickCount64;
++            var lastTick = Interlocked.Read(ref _lastPreviewLogTick);
++            if (!force && nowTick - lastTick < 2000)
++                return;
++
++            Interlocked.Exchange(ref _lastPreviewLogTick, nowTick);
++            _logger.LogInformation(
++                "Preview {CameraName} {Stage}: running={Running} crop={Crop} recv={Received} queued={Queued} rendered={Rendered} dropped={Dropped} bitmap={HasBitmap} frame={Width}x{Height}x{Channels}",
++                Name,
++                stage,
++                IsCameraRunning,
++                IsCropMode,
++                Interlocked.Read(ref _previewFramesReceived),
++                Interlocked.Read(ref _previewFramesQueued),
++                Interlocked.Read(ref _previewFramesRendered),
++                Interlocked.Read(ref _previewFramesDropped),
++                Bitmap != null,
++                width != 0 ? width : Bitmap?.PixelSize.Width ?? 0,
++                height != 0 ? height : Bitmap?.PixelSize.Height ?? 0,
++                channels);
++        }
+     }
+ 
+     // Necessary evil to store some globals that don't really have place to go :( _sob_
+@@ -448,11 +636,11 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+         var cameras = _deviceEnumerator.UpdateCameras();
+         var cameraNames = cameras.Keys.ToArray();
+ 
+-        LeftCamera = new CameraControllerModel(_localSettings, _platformConnector, _deviceEnumerator, "LeftCamera",
++        LeftCamera = new CameraControllerModel(_localSettings, _platformConnector, _deviceEnumerator, _logger, "LeftCamera",
+             cameraNames, Camera.Left);
+-        RightCamera = new CameraControllerModel(_localSettings, _platformConnector, _deviceEnumerator, "RightCamera",
++        RightCamera = new CameraControllerModel(_localSettings, _platformConnector, _deviceEnumerator, _logger, "RightCamera",
+             cameraNames, Camera.Right);
+-        FaceCamera = new CameraControllerModel(_localSettings, _platformConnector, _deviceEnumerator, "FaceCamera",
++        FaceCamera = new CameraControllerModel(_localSettings, _platformConnector, _deviceEnumerator, _logger, "FaceCamera",
+             cameraNames, Camera.Face);
+ 
+         FaceCamera.PropertyChanged += CameraControllerModel_PropertyChanged;
+@@ -479,10 +667,42 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+         _eyePipelineEventBus.Subscribe<EyePipelineEvents.ExceptionEvent>(EyePipelineExceptionHandler);
+ 
+         IsInitialized = true;
++        WirePreviewVisibilityTracking();
+ 
+         _ = TryStartCamerasAsync();
+     }
+ 
++    private void WirePreviewVisibilityTracking()
++    {
++        if (Application.Current?.ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime
++            {
++                MainWindow: { } mainWindow
++            })
++            return;
++
++        void ApplyPreviewState()
++        {
++            var enabled = mainWindow.IsVisible &&
++                          mainWindow.WindowState != WindowState.Minimized &&
++                          mainWindow.IsActive;
++
++            FaceCamera.SetPreviewEnabled(enabled);
++            LeftCamera.SetPreviewEnabled(enabled);
++            RightCamera.SetPreviewEnabled(enabled);
++        }
++
++        mainWindow.Opened += (_, _) => ApplyPreviewState();
++        mainWindow.Activated += (_, _) => ApplyPreviewState();
++        mainWindow.Deactivated += (_, _) => ApplyPreviewState();
++        mainWindow.PropertyChanged += (_, args) =>
++        {
++            if (args.Property == Avalonia.Controls.Window.WindowStateProperty || args.Property == Visual.IsVisibleProperty)
++                ApplyPreviewState();
++        };
++
++        ApplyPreviewState();
++    }
++
+     private void CameraControllerModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+     {
+         if (e.PropertyName != "ImportantSettingsProperty") return;
+@@ -528,24 +748,30 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+ 
+     private void EyePipelineExceptionHandler(EyePipelineEvents.ExceptionEvent e)
+     {
+-        LeftCamera.StartButtonEnabled = true;
+-        LeftCamera.StopButtonEnabled = false;
+-        LeftCamera.Bitmap = null;
+-        LeftCamera.IsCameraRunning = false;
+-
+-        RightCamera.StartButtonEnabled = true;
+-        RightCamera.StopButtonEnabled = false;
+-        RightCamera.Bitmap = null;
+-        RightCamera.IsCameraRunning = false;
++        Dispatcher.UIThread.Post(() =>
++        {
++            LeftCamera.StartButtonEnabled = true;
++            LeftCamera.StopButtonEnabled = false;
++            LeftCamera.Bitmap = null;
++            LeftCamera.IsCameraRunning = false;
++
++            RightCamera.StartButtonEnabled = true;
++            RightCamera.StopButtonEnabled = false;
++            RightCamera.Bitmap = null;
++            RightCamera.IsCameraRunning = false;
++        });
+     }
+ 
+     private void FacePipelineExceptionHandler(FacePipelineEvents.ExceptionEvent e)
+     {
+-        FaceCamera.StartButtonEnabled = true;
+-        FaceCamera.StopButtonEnabled = false;
++        Dispatcher.UIThread.Post(() =>
++        {
++            FaceCamera.StartButtonEnabled = true;
++            FaceCamera.StopButtonEnabled = false;
+ 
+-        FaceCamera.Bitmap = null;
+-        FaceCamera.IsCameraRunning = false;
++            FaceCamera.Bitmap = null;
++            FaceCamera.IsCameraRunning = false;
++        });
+     }
+ 
+     [RelayCommand]
+@@ -642,7 +868,10 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+                 // 1) This call originates from the UI, IE a user has requested it
+                 // 2) The current camera differs from the previous (IE, an existing connection was interrupted)
+                 var lastOpenedCameraName = _localSettings.ReadSetting<string>("LastOpened" + model.Name);
+-                if (startMaximized && lastOpenedCameraName != model.DisplayAddress)
++                if (startMaximized &&
++                    lastOpenedCameraName != model.DisplayAddress &&
++                    model.CropManager.MaxSize.Width > 0 &&
++                    model.CropManager.MaxSize.Height > 0)
+                 {
+                     model.SelectWholeFrame();
+                 }
+@@ -756,9 +985,17 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+     private void CleanupResources()
+     {
+         if (_disposed) return;
++        _disposed = true;
+         FaceCamera.CamViewMode = CamViewMode.Tracking;
+         LeftCamera.CamViewMode = CamViewMode.Tracking;
+         RightCamera.CamViewMode = CamViewMode.Tracking;
++        FaceCamera.Cleanup();
++        LeftCamera.Cleanup();
++        RightCamera.Cleanup();
++
++        FaceCamera.PropertyChanged -= CameraControllerModel_PropertyChanged;
++        LeftCamera.PropertyChanged -= CameraControllerModel_PropertyChanged;
++        RightCamera.PropertyChanged -= CameraControllerModel_PropertyChanged;
+ 
+         _facePipelineEventBus.Unsubscribe<FacePipelineEvents.NewFrameEvent>(FaceCamera.FaceNewImageUpdateEventHandler);
+         _facePipelineEventBus.Unsubscribe<FacePipelineEvents.NewTransformedFrameEvent>(FaceCamera
+diff --git a/src/Baballonia/Views/AppSettingsView.axaml b/src/Baballonia/Views/AppSettingsView.axaml
+index a916214..d5a0be9 100644
+--- a/src/Baballonia/Views/AppSettingsView.axaml
++++ b/src/Baballonia/Views/AppSettingsView.axaml
+@@ -218,16 +218,20 @@
+                   Margin="5"
+                   FontSize="16"
+                   FontWeight="SemiBold"
+-                  Text="{x:Static assets:Resources.Settings_Filter_Header}" />
++                  Text="Eye Smoothing Filter" />
+               <TextBlock
+                   Margin="5"
+                   FontSize="14"
+                   Foreground="{DynamicResource SystemChromeGrayColor}"
+-                  Text="{x:Static assets:Resources.Settings_Filter_Description}" />
++                  Text="Choose the live smoothing algorithm. One-Euro tuning below only affects OneEuro Current." />
+             </StackPanel>
+-            <ToggleSwitch
++            <ComboBox
+               Grid.Column="3"
+-              IsChecked="{Binding OneEuroMinEnabled,  Mode=TwoWay}"/>
++              Width="220"
++              VerticalAlignment="Center"
++              Margin="0,8,8,8"
++              ItemsSource="{Binding EyeSmoothingFilterOptions}"
++              SelectedItem="{Binding EyeSmoothingFilter, Mode=TwoWay}" />
+           </Grid>
+         </Expander.Header>
+         <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto">
+@@ -323,6 +327,15 @@
+         </Grid>
+       </Expander>
+ 
++      <controls:SettingsBlock
++          Title="Eye Trace Recording"
++          Description="Record real eye traces to Documents\\ProjectBabble\\EyeTraceCapture for N-Euro training. Turn it on, play, then turn it off."
++          IconPath="DataUsageSettingsRegular">
++        <controls:SettingsBlock.SettingsContent>
++          <ToggleSwitch IsChecked="{Binding RecordEyeTrace, Mode=TwoWay}" />
++        </controls:SettingsBlock.SettingsContent>
++      </controls:SettingsBlock>
++
+       <controls:SettingsToggle
+           Title="{x:Static assets:Resources.Settings_GPU_Header}"
+           Description="{x:Static assets:Resources.Settings_GPU_Description}"
+@@ -341,6 +354,32 @@
+           IconPath="EyeTrackingRegular"
+           SettingToggled="{Binding StabilizeEyes, Mode=TwoWay}" />
+ 
++      <controls:SettingsBlock
++          Title="Eye Corruption Filter"
++          Description="Choose how Baballonia drops corrupted eye frames before inference."
++          IconPath="EyeTrackingSettingsRegular">
++        <controls:SettingsBlock.SettingsContent>
++          <ComboBox
++              VerticalAlignment="Center"
++              Width="220"
++              ItemsSource="{Binding CorruptionDetectorOptions}"
++              SelectedItem="{Binding CorruptionDetector, Mode=TwoWay}" />
++        </controls:SettingsBlock.SettingsContent>
++      </controls:SettingsBlock>
++
++      <controls:SettingsBlock
++          Title="Bigeye Capture Backend"
++          Description="Stable uses MSMF. Low Latency uses DSHOW."
++          IconPath="VideoRegular">
++        <controls:SettingsBlock.SettingsContent>
++          <ComboBox
++              VerticalAlignment="Center"
++              Width="220"
++              ItemsSource="{Binding BigeyeWindowsBackendOptions}"
++              SelectedItem="{Binding BigeyeWindowsBackend, Mode=TwoWay}" />
++        </controls:SettingsBlock.SettingsContent>
++      </controls:SettingsBlock>
++
+       <controls:SettingsBlock
+         Title="{x:Static assets:Resources.Settings_LogLevel_Header}"
+         Description="{x:Static assets:Resources.Settings_LogLevel_Description}"
+diff --git a/src/Baballonia/Views/HomePageView.axaml.cs b/src/Baballonia/Views/HomePageView.axaml.cs
+index 52d520c..f45ceee 100644
+--- a/src/Baballonia/Views/HomePageView.axaml.cs
++++ b/src/Baballonia/Views/HomePageView.axaml.cs
+@@ -6,6 +6,7 @@ using Avalonia.VisualTree;
+ using Baballonia.Contracts;
+ using Baballonia.Helpers;
+ using Baballonia.ViewModels.SplitViewPane;
++using Microsoft.Extensions.Logging;
+ using System;
+ using System.ComponentModel;
+ using System.Linq;
+@@ -21,14 +22,17 @@ public partial class HomePageView : ViewBase
+     };
+ 
+     private bool _isLayoutUpdating;
++    private bool _diagnosticsAttached;
+ 
+     private readonly IDeviceEnumerator _deviceEnumerator;
+     private readonly ILocalSettingsService _localSettings;
++    private readonly ILogger<HomePageView> _logger;
+ 
+-    public HomePageView(IDeviceEnumerator deviceEnumerator, ILocalSettingsService localSettings)
++    public HomePageView(IDeviceEnumerator deviceEnumerator, ILocalSettingsService localSettings, ILogger<HomePageView> logger)
+     {
+         _deviceEnumerator = deviceEnumerator;
+         _localSettings = localSettings;
++        _logger = logger;
+         InitializeComponent();
+ 
+         if (Utils.IsSupportedDesktopOS)
+@@ -146,6 +150,7 @@ public partial class HomePageView : ViewBase
+             SetupCropEvents(vm.LeftCamera, LeftMouthWindow);
+             SetupCropEvents(vm.RightCamera, RightMouthWindow);
+             SetupCropEvents(vm.FaceCamera, FaceWindow);
++            AttachDiagnostics(vm);
+ 
+             vm.SelectedCalibrationTextBlock = this.Find<TextBlock>("SelectedCalibrationTextBlockColor")!;
+             vm.SelectedCalibrationTextBlock.Text = Assets.Resources.Home_Eye_Calibration;
+@@ -190,6 +195,69 @@ public partial class HomePageView : ViewBase
+         vm.RequestedVRCalibration = CalibrationRoutine.Map[menuItem.Name!];
+     }
+ 
++    private void AttachDiagnostics(HomePageViewModel vm)
++    {
++        if (Environment.GetEnvironmentVariable("BABALLONIA_DIAGNOSTICS") != "1")
++            return;
++
++        if (_diagnosticsAttached)
++            return;
++
++        _diagnosticsAttached = true;
++
++        AttachCameraDiagnostics("Left", vm.LeftCamera, LeftViewBox, LeftMouthWindow);
++        AttachCameraDiagnostics("Right", vm.RightCamera, RightViewBox, RightMouthWindow);
++        AttachCameraDiagnostics("Face", vm.FaceCamera, FaceViewBox, FaceWindow);
++    }
++
++    private void AttachCameraDiagnostics(string name, HomePageViewModel.CameraControllerModel model, Viewbox viewbox, Image image)
++    {
++        model.PropertyChanged += (_, args) =>
++        {
++            if (args.PropertyName is not nameof(HomePageViewModel.CameraControllerModel.IsCameraRunning) and
++                not nameof(HomePageViewModel.CameraControllerModel.Bitmap))
++                return;
++
++            var bitmapSize = model.Bitmap == null ? "null" : $"{model.Bitmap.PixelSize.Width}x{model.Bitmap.PixelSize.Height}";
++            _logger.LogInformation(
++                "View {CameraName} model {PropertyName}: running={Running} bitmap={BitmapSize} viewVisible={ViewVisible} imageVisible={ImageVisible} sourceNull={SourceNull}",
++                name,
++                args.PropertyName,
++                model.IsCameraRunning,
++                bitmapSize,
++                viewbox.IsVisible,
++                image.IsVisible,
++                image.Source == null);
++        };
++
++        viewbox.PropertyChanged += (_, args) =>
++        {
++            if (args.Property?.Name != "IsVisible")
++                return;
++
++            _logger.LogInformation(
++                "View {CameraName} viewbox visibility: visible={Visible} running={Running} sourceNull={SourceNull}",
++                name,
++                viewbox.IsVisible,
++                model.IsCameraRunning,
++                image.Source == null);
++        };
++
++        image.PropertyChanged += (_, args) =>
++        {
++            if (args.Property != Image.SourceProperty)
++                return;
++
++            _logger.LogInformation(
++                "View {CameraName} image source: sourceNull={SourceNull} running={Running} viewVisible={ViewVisible} imageBounds={Bounds}",
++                name,
++                image.Source == null,
++                model.IsCameraRunning,
++                viewbox.IsVisible,
++                image.Bounds);
++        };
++    }
++
+     private void OnExpanderCollapsed(object? sender, RoutedEventArgs e)
+     {
+         if (_isLayoutUpdating) return;

@@ -42,18 +42,27 @@ index deba55f..aa7e652 100644
 \ No newline at end of file
 +}
 diff --git a/VRCFaceTracking.Core/Library/UnifiedLibManager.cs b/VRCFaceTracking.Core/Library/UnifiedLibManager.cs
-index e35a951..8e6fc4d 100644
+index 79557d1..8e6fc4d 100644
 --- a/VRCFaceTracking.Core/Library/UnifiedLibManager.cs
 +++ b/VRCFaceTracking.Core/Library/UnifiedLibManager.cs
-@@ -3,6 +3,7 @@ using System.Diagnostics;
+@@ -1,14 +1,10 @@
+-using System;
+ using System.Collections.ObjectModel;
+ using System.Diagnostics;
+-using System.IO;
  using System.Reflection;
- using System.Runtime.InteropServices;
+-using System.Runtime.Loader;
++using System.Runtime.InteropServices;
  using Microsoft.Extensions.Logging;
+-using Sentry.Protocol;
+-using VRCFaceTracking.Core.Contracts;
 +using VRCFaceTracking.Core.Services;
  using VRCFaceTracking.Core.Contracts.Services;
+-using VRCFaceTracking.Core.Models;
  using VRCFaceTracking.Core.Sandboxing;
  using VRCFaceTracking.Core.Sandboxing.IPC;
-@@ -11,6 +12,10 @@ namespace VRCFaceTracking.Core.Library;
+ 
+@@ -16,6 +12,10 @@ namespace VRCFaceTracking.Core.Library;
  
  public class UnifiedLibManager : ILibManager
  {
@@ -64,7 +73,7 @@ index e35a951..8e6fc4d 100644
      #region Logger
      private readonly ILogger<UnifiedLibManager> _logger;
      private readonly ILogger _moduleLogger;
-@@ -33,6 +38,10 @@ public class UnifiedLibManager : ILibManager
+@@ -38,6 +38,10 @@ public class UnifiedLibManager : ILibManager
      private List<Assembly> AvailableModules { get; set; }
      private readonly List<ModuleRuntimeInfo> _moduleThreads = new();
      private readonly IModuleDataService _moduleDataService;
@@ -75,11 +84,11 @@ index e35a951..8e6fc4d 100644
  
      private string _sandboxProcessPath { get; set; }
      private List<ModuleRuntimeInfo> AvailableSandboxModules = new ();
-@@ -52,7 +61,10 @@ public class UnifiedLibManager : ILibManager
+@@ -57,7 +61,10 @@ public class UnifiedLibManager : ILibManager
          _moduleDataService = moduleDataService;
  
          LoadedModulesMetadata = new ObservableCollection<ModuleMetadataInternal>();
--        _sandboxProcessPath = Path.GetFullPath(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "VRCFaceTracking.ModuleProcess.exe" : "VRCFaceTracking.ModuleProcess");
+-        _sandboxProcessPath = Path.GetFullPath("VRCFaceTracking.ModuleProcess.exe");
 +        var sandboxProcessFileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
 +            ? "VRCFaceTracking.ModuleProcess.exe"
 +            : "VRCFaceTracking.ModuleProcess";
@@ -87,7 +96,7 @@ index e35a951..8e6fc4d 100644
          if ( !File.Exists(_sandboxProcessPath) )
          {
              // @TODO: Better error handling
-@@ -62,8 +74,285 @@ public class UnifiedLibManager : ILibManager
+@@ -67,8 +74,285 @@ public class UnifiedLibManager : ILibManager
          // @TODO: Kill any lingering sub-modules to eliminate any conflicts
      }
  
@@ -373,7 +382,7 @@ index e35a951..8e6fc4d 100644
          LoadedModulesMetadata.Clear();
          LoadedModulesMetadata.Add(new ModuleMetadataInternal
          { 
-@@ -179,6 +468,10 @@ public class UnifiedLibManager : ILibManager
+@@ -184,6 +468,10 @@ public class UnifiedLibManager : ILibManager
                              // Update support variables
                              AvailableSandboxModules[moduleIndex].SupportsEyeTracking        = AvailableSandboxModules[moduleIndex].SupportsEyeTracking && replyInitPacket.eyeSuccess;
                              AvailableSandboxModules[moduleIndex].SupportsExpressionTracking = AvailableSandboxModules[moduleIndex].SupportsExpressionTracking && replyInitPacket.expressionSuccess;
@@ -384,9 +393,14 @@ index e35a951..8e6fc4d 100644
  
                              _logger.LogInformation("Got init for module {module}. Eye: {eye} Expr: {expr}...",
                                  AvailableSandboxModules[moduleIndex].ModuleClassName,
-@@ -208,7 +501,8 @@ public class UnifiedLibManager : ILibManager
-                             AvailableSandboxModules[moduleIndex].ModuleInformation.UsingEye         = !AvailableSandboxModules.Any(m => m.ModuleInformation.UsingEye) && replyInitPacket.eyeSuccess;
-                             AvailableSandboxModules[moduleIndex].ModuleInformation.UsingExpression  = !AvailableSandboxModules.Any(m => m.ModuleInformation.UsingExpression) && replyInitPacket.expressionSuccess;
+@@ -210,10 +498,11 @@ public class UnifiedLibManager : ILibManager
+                             ExpressionStatus    = replyInitPacket.expressionSuccess ? ModuleState.Active : ModuleState.Uninitialized;
+ 
+                             AvailableSandboxModules[moduleIndex].ModuleInformation.Active           = true;
+-                            AvailableSandboxModules[moduleIndex].ModuleInformation.UsingEye         = replyInitPacket.eyeSuccess;
+-                            AvailableSandboxModules[moduleIndex].ModuleInformation.UsingExpression  = replyInitPacket.expressionSuccess;
++                            AvailableSandboxModules[moduleIndex].ModuleInformation.UsingEye         = !AvailableSandboxModules.Any(m => m.ModuleInformation.UsingEye) && replyInitPacket.eyeSuccess;
++                            AvailableSandboxModules[moduleIndex].ModuleInformation.UsingExpression  = !AvailableSandboxModules.Any(m => m.ModuleInformation.UsingExpression) && replyInitPacket.expressionSuccess;
                              AvailableSandboxModules[moduleIndex].ModuleInformation.StaticImages     = replyInitPacket.IconDataStreams;
 -                            EnsureModuleThreadStartedSandboxed(AvailableSandboxModules[moduleIndex]);
 +                            if (!replyInitPacket.prefersPushUpdates)
@@ -394,7 +408,7 @@ index e35a951..8e6fc4d 100644
  
                              _dispatcherService.Run(() => {
  
-@@ -268,6 +562,38 @@ public class UnifiedLibManager : ILibManager
+@@ -273,6 +562,38 @@ public class UnifiedLibManager : ILibManager
                      case IpcPacket.PacketType.ReplyUpdate:
                          {
                              ReplyUpdatePacket replyUpdatePacket = (ReplyUpdatePacket) packet;
@@ -433,15 +447,24 @@ index e35a951..8e6fc4d 100644
  
                              if ( AvailableSandboxModules[moduleIndex].Status == ModuleState.Active && AvailableSandboxModules[moduleIndex].ModuleInformation.Active )
                              {
-@@ -280,6 +606,7 @@ public class UnifiedLibManager : ILibManager
+@@ -284,6 +605,8 @@ public class UnifiedLibManager : ILibManager
+                                 {
                                      replyUpdatePacket.UpdateGlobalExpressionState();
                                  }
-                                 replyUpdatePacket.UpdateHeadState();
++                                replyUpdatePacket.UpdateHeadState();
 +                                ParameterSenderService.SignalPendingUpdate();
                              }
  
                              break;
-@@ -403,7 +730,7 @@ public class UnifiedLibManager : ILibManager
+@@ -377,6 +700,7 @@ public class UnifiedLibManager : ILibManager
+                 };
+                 lock ( AvailableSandboxModules )
+                 {
++                    _logger.LogDebug("Started sandbox process with dll {dllPath}", dll);
+                     AvailableSandboxModules.Add(runtimeInfo);
+                 }
+             }
+@@ -406,7 +730,7 @@ public class UnifiedLibManager : ILibManager
              var updatePacket = new EventUpdatePacket();
              while (!cts.IsCancellationRequested)
              {
@@ -450,7 +473,7 @@ index e35a951..8e6fc4d 100644
                  _sandboxServer.SendData(updatePacket, port);
              }
              _logger.LogDebug("Thread for {module} ended", module.GetType().Name);
-@@ -437,32 +764,50 @@ public class UnifiedLibManager : ILibManager
+@@ -440,57 +764,122 @@ public class UnifiedLibManager : ILibManager
          }
      }
  
@@ -463,9 +486,15 @@ index e35a951..8e6fc4d 100644
 -        var eventTeardownPacket = new EventTeardownPacket();
 -        _sandboxServer.SendData(eventTeardownPacket, module.SandboxProcessPort);
 +        ReleaseModuleTrackingClaims(module);
-+
+ 
+-        // Kill the update thread
+-        module.UpdateCancellationToken.Cancel();
+-        if ( module.UpdateThread.IsAlive )
 +        if (gracefulRequest)
-+        {
+         {
+-            // Edge case, we wait for the thread to finish before unloading the assembly
+-            _logger.LogDebug("Waiting for {module}'s thread to join...", module.ModuleClassName);
+-            module.UpdateThread.Join();
 +            // Send a message to the module sub-process
 +            var eventTeardownPacket = new EventTeardownPacket();
 +            try
@@ -476,10 +505,10 @@ index e35a951..8e6fc4d 100644
 +            {
 +                _logger.LogWarning(ex, "Failed sending teardown packet to sandbox module {module}. Forcing process shutdown.", module.ModuleClassName);
 +            }
-+        }
+         }
  
-         // Kill the update thread
-         module.UpdateCancellationToken?.Cancel();
++        // Kill the update thread
++        module.UpdateCancellationToken?.Cancel();
          // Give the module 100ms to kill itself
          Thread.Sleep(100);
  
@@ -487,55 +516,58 @@ index e35a951..8e6fc4d 100644
 +            return true;
 +
          // Only bother tearing down a module if it's actually shutdown
--        if ( !(module.Process?.HasExited ?? true) )
+-        if ( !module.Process.HasExited )
 +        try
          {
 -            _logger.LogDebug("Module process has not yet exited");
--            try  {
--                if (!(module.Process?.WaitForExit(200) ?? false))
+-            // @Note: Forcefully kill the process. We'll try to kill it 1000 times and then give up.
+-            int tries = 0;
+-            while ( tries < 1000 )
 +            module.Process.Refresh();
 +            if (!module.Process.HasExited)
-+            {
+             {
+-                try
 +                _logger.LogDebug("Module process has not yet exited");
 +                if (!module.Process.WaitForExit(200))
                  {
--                    _logger.LogDebug("Module {id} didn't exit gracefully. Forcing kill...", module.Process?.Id ?? -1);
--                    module.Process?.Kill(entireProcessTree: true);
--                    if (!(module.Process?.WaitForExit(2000) ?? false))
+-                    tries++;
+-                    if ( !module.Process.HasExited )
+-                        module.Process.Kill();
+-                    if ( module.Process.HasExited )
 +                    _logger.LogDebug("Module {id} didn't exit gracefully. Forcing kill...", module.Process.Id);
 +                    module.Process.Kill(entireProcessTree: true);
 +                    if (!module.Process.WaitForExit(2000))
                      {
-                         // on windows we can use taskkill /F /T /PID {procId} to force kill a process very aggressively. this has a higher success rate than process.kill!
--                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+-                        tries = int.MaxValue;
+-                        break;
++                        // on windows we can use taskkill /F /T /PID {procId} to force kill a process very aggressively. this has a higher success rate than process.kill!
 +                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
 +                        {
-                             using var killer = Process.Start(new ProcessStartInfo
-                             {
-                                 FileName = "taskkill",
-@@ -471,20 +816,29 @@ public class UnifiedLibManager : ILibManager
-                                 UseShellExecute = false
-                             });
-                             killer?.WaitForExit(2000);
--                        } else {
++                            using var killer = Process.Start(new ProcessStartInfo
++                            {
++                                FileName = "taskkill",
++                                Arguments = $"/F /T /PID {module.Process.Id}",
++                                CreateNoWindow = true,
++                                UseShellExecute = false
++                            });
++                            killer?.WaitForExit(2000);
 +                        }
 +                        else
 +                        {
-                             _logger.LogCritical("Process {id} is a zombie or stuck in Kernel I/O. Manual intervention required.", module.Process.Id);
-                         }
--                        return false; 
++                            _logger.LogCritical("Process {id} is a zombie or stuck in Kernel I/O. Manual intervention required.", module.Process.Id);
++                        }
 +
 +                        module.Process.Refresh();
 +                        if (!module.Process.HasExited)
 +                            return false;
                      }
+-                } catch ( System.ComponentModel.Win32Exception ex ) {
+-                    // Can fail to call OpenProcessEx due to some error such as ACCESS_DENIED (process has higher priveleges, eg Sraniple)
+-                    _logger.LogError($"Tried killing process with PID {module.Process.Id}. Got win32 error ({ex.ToString()}");
+-                } catch ( Exception ex ) {
+-                    // Tell the user why we got an exception so that we can hopefully fix it.
+-                    _logger.LogError($"Tried killing process with PID {module.Process.Id}. Got exception ({ex.HResult}) {ex.Message}");
                  }
--            } catch ( System.ComponentModel.Win32Exception ex ) {
--                // Can fail to call OpenProcessEx due to some error such as ACCESS_DENIED (process has higher priveleges, eg Sraniple)
--                _logger.LogError($"Tried killing process with PID {module.Process.Id}. Got win32 error ({ex.ToString()}");
--            } catch ( Exception ex ) {
--                // Tell the user why we got an exception so that we can hopefully fix it.
--                _logger.LogError($"Tried killing process with PID {module.Process.Id}. Got exception ({ex.HResult}) {ex.Message}");
              }
          }
 +        catch (System.ComponentModel.Win32Exception ex)
@@ -548,10 +580,15 @@ index e35a951..8e6fc4d 100644
 +            _logger.LogError(ex, "Tried killing process with PID {pid}.", module.Process.Id);
 +            return false;
 +        }
++
++        if (module.UpdateThread?.IsAlive ?? false)
++        {
++            // Edge case, we wait for the thread to finish before unloading the assembly
++            var moduleName = module.ModuleInformation?.Name ?? module.ModuleClassName ?? "Unknown";
++            _logger.LogDebug("Waiting for {module}'s thread to join...", moduleName);
++            module.UpdateThread?.Join(500);
++        }
  
-         if (module.UpdateThread?.IsAlive ?? false)
-         {
-@@ -497,6 +851,35 @@ public class UnifiedLibManager : ILibManager
          return true;
      }
  
@@ -587,7 +624,53 @@ index e35a951..8e6fc4d 100644
      // Signal all active modules to gracefully shut down their respective runtimes
      public void TeardownAllAndResetAsync()
      {
-@@ -546,4 +929,4 @@ public class UnifiedLibManager : ILibManager
+@@ -499,6 +888,8 @@ public class UnifiedLibManager : ILibManager
+         foreach ( var module in _moduleThreads )
+         {
+             var success = false;
++            if (module == null || (module.Process?.HasExited ?? true))
++                continue;
+             try
+             {
+                 success = TeardownModuleSandboxed(module);
+@@ -514,18 +905,11 @@ public class UnifiedLibManager : ILibManager
+ 
+         _moduleThreads.Clear();
+ 
+-        EyeStatus = ModuleState.Uninitialized;
+-        ExpressionStatus = ModuleState.Uninitialized;
+-    }
+-
+-    // Signal all active modules to gracefully shut down their respective runtimes
+-    public void TeardownAllAndResetAsyncLegacy()
+-    {
+-        _logger.LogInformation("Tearing down all modules...");
+-
+-        foreach ( var module in _moduleThreads )
++        foreach ( var module in AvailableSandboxModules )
+         {
+             var success = false;
++            if (module == null || (module.Process?.HasExited ?? true)) // c# objects may be null, use null coalesce to detect if a module has been destroyed but we have a lingering ref to it
++                continue;
+             try
+             {
+                 success = TeardownModuleSandboxed(module);
+@@ -533,15 +917,16 @@ public class UnifiedLibManager : ILibManager
+             {
+                 if ( !success )
+                 {
+-                    _logger.LogWarning($"Module: {module.Module.ModuleInformation.Name} failed to shut down. Killing its thread.");
+-                    module.UpdateThread.Interrupt();
++                    var moduleName = module.ModuleInformation?.Name ?? module.ModuleClassName ?? "Unknown";
++                    _logger.LogWarning($"Module: {moduleName} failed to shut down. Killing its thread.");
++                    module.UpdateThread?.Interrupt();
+                 }
+             }
+         }
+ 
+-        _moduleThreads.Clear();
++        AvailableSandboxModules.Clear();
+ 
          EyeStatus = ModuleState.Uninitialized;
          ExpressionStatus = ModuleState.Uninitialized;
      }
@@ -690,7 +773,7 @@ index 7c96d58..cb63a84 100644
          int moduleInfoStringLength  = BitConverter.ToInt32(data, 9);
          ModuleInformationName       = Encoding.UTF8.GetString(data, 13, moduleInfoStringLength);
 diff --git a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
-index cfecc5a..0ac3aff 100644
+index e1278f1..e0693eb 100644
 --- a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
 +++ b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
 @@ -1,9 +1,5 @@
@@ -720,11 +803,19 @@ index cfecc5a..0ac3aff 100644
      internal class UpdateDataContiguous
      {
          internal float Eye_MaxDilation;
-@@ -37,15 +40,9 @@ public class ReplyUpdatePacket : IpcPacket
-         internal float Head_PosY;
-         internal float Head_PosZ;
+@@ -29,15 +32,17 @@ public class ReplyUpdatePacket : IpcPacket
+         internal float Eye_Right_PupilDiameter_MM;
+         internal float Eye_Right_Openness;
  
 -        [MarshalAs(UnmanagedType.ByValArray, SizeConst = EXPRESSION_COUNT)]
++        internal float Head_Yaw;
++        internal float Head_Pitch;
++        internal float Head_Roll;
++
++        internal float Head_PosX;
++        internal float Head_PosY;
++        internal float Head_PosZ;
++
          internal float[] Expression_Shapes;
      }
  
@@ -736,7 +827,7 @@ index cfecc5a..0ac3aff 100644
      public override PacketType GetPacketType() => PacketType.ReplyUpdate;
  
      // We send a challenge to the vrcft host, and if we receive a reply with the same data, we consider the connection successfully ACKed.
-@@ -54,9 +51,8 @@ public class ReplyUpdatePacket : IpcPacket
+@@ -46,9 +51,8 @@ public class ReplyUpdatePacket : IpcPacket
      {
          // Build handshake packet
  
@@ -748,7 +839,21 @@ index cfecc5a..0ac3aff 100644
  
          // Update the internal data structure to match the current state of unified tracking
          _contiguousUnifiedData.Eye_Left_GazeX               = UnifiedTracking.Data.Eye.Left.Gaze.x;
-@@ -86,49 +82,58 @@ public class ReplyUpdatePacket : IpcPacket
+@@ -64,55 +68,72 @@ public class ReplyUpdatePacket : IpcPacket
+         _contiguousUnifiedData.Eye_MaxDilation              = UnifiedTracking.Data.Eye._maxDilation;
+         _contiguousUnifiedData.Eye_MinDilation              = UnifiedTracking.Data.Eye._minDilation;
+ 
++        _contiguousUnifiedData.Head_Yaw                     = UnifiedTracking.Data.Head.HeadPitch;
++        _contiguousUnifiedData.Head_Pitch                   = UnifiedTracking.Data.Head.HeadRoll;
++        _contiguousUnifiedData.Head_Roll                    = UnifiedTracking.Data.Head.HeadYaw;
++
++        _contiguousUnifiedData.Head_PosX                    = UnifiedTracking.Data.Head.HeadPosX;
++        _contiguousUnifiedData.Head_PosY                    = UnifiedTracking.Data.Head.HeadPosY;
++        _contiguousUnifiedData.Head_PosZ                    = UnifiedTracking.Data.Head.HeadPosZ;
++
+         // Copy face tracking
+         for ( int i = 0; i < _contiguousUnifiedData.Expression_Shapes.Length; i++ )
+         {
              _contiguousUnifiedData.Expression_Shapes[i] = UnifiedTracking.Data.Shapes[i].Weight;
          }
  
@@ -841,7 +946,43 @@ index cfecc5a..0ac3aff 100644
          }
      }
  
-@@ -202,4 +207,17 @@ public class ReplyUpdatePacket : IpcPacket
+@@ -151,15 +172,52 @@ public class ReplyUpdatePacket : IpcPacket
+             UnifiedTracking.Data.Eye._maxDilation = _contiguousUnifiedData.Eye_MaxDilation;
+         if ( _contiguousUnifiedData.Eye_MinDilation != INVALID_FLOAT )
+             UnifiedTracking.Data.Eye._minDilation = _contiguousUnifiedData.Eye_MinDilation;
++
++        // Eye-derived expression shapes
++        for ( int i = (int)UnifiedExpressions.EyeSquintRight; i <= (int)UnifiedExpressions.BrowOuterUpLeft; i++ )
++        {
++            if ( _contiguousUnifiedData.Expression_Shapes[i] != INVALID_FLOAT )
++                UnifiedTracking.Data.Shapes[i].Weight = _contiguousUnifiedData.Expression_Shapes[i];
++        }
++    }
++
++    public void UpdateHeadState()
++    {
++        if ( _contiguousUnifiedData.Head_Yaw != INVALID_FLOAT )
++            UnifiedTracking.Data.Head.HeadYaw = _contiguousUnifiedData.Head_Yaw;
++        if ( _contiguousUnifiedData.Head_Pitch != INVALID_FLOAT )
++            UnifiedTracking.Data.Head.HeadPitch = _contiguousUnifiedData.Head_Pitch;
++        if ( _contiguousUnifiedData.Head_Roll != INVALID_FLOAT )
++            UnifiedTracking.Data.Head.HeadRoll = _contiguousUnifiedData.Head_Roll;
++
++        if ( _contiguousUnifiedData.Head_PosX != INVALID_FLOAT )
++            UnifiedTracking.Data.Head.HeadPosX = _contiguousUnifiedData.Head_PosX;
++        if ( _contiguousUnifiedData.Head_PosY != INVALID_FLOAT )
++            UnifiedTracking.Data.Head.HeadPosY = _contiguousUnifiedData.Head_PosY;
++        if ( _contiguousUnifiedData.Head_PosZ != INVALID_FLOAT )
++            UnifiedTracking.Data.Head.HeadPosZ = _contiguousUnifiedData.Head_PosZ;
+     }
+ 
+     public void UpdateGlobalExpressionState()
+     {
+         // Copy face tracking
+-        for ( int i = 0; i < _contiguousUnifiedData.Expression_Shapes.Length; i++ )
++        for ( int i = (int)UnifiedExpressions.BrowOuterUpLeft; i < _contiguousUnifiedData.Expression_Shapes.Length; i++ )
+         {
+             if ( _contiguousUnifiedData.Expression_Shapes[i] != INVALID_FLOAT)
                  UnifiedTracking.Data.Shapes[i].Weight = _contiguousUnifiedData.Expression_Shapes[i];
          }
      }
@@ -1183,7 +1324,7 @@ index 584bd6d..466e6ec 100644
              case "/vrcft/settings/forceRelevant":   // Endpoint for external tools to force vrcft to send all parameters
                  if (msg.Value is bool relevancy)
 diff --git a/VRCFaceTracking.Core/Services/OscRecvService.cs b/VRCFaceTracking.Core/Services/OscRecvService.cs
-index 43bb165..2f02d97 100644
+index 345c7f1..2f02d97 100644
 --- a/VRCFaceTracking.Core/Services/OscRecvService.cs
 +++ b/VRCFaceTracking.Core/Services/OscRecvService.cs
 @@ -11,6 +11,7 @@ namespace VRCFaceTracking.Core.Services;
@@ -1194,6 +1335,15 @@ index 43bb165..2f02d97 100644
      private readonly ILogger<OscRecvService> _logger;
      private readonly IOscTarget _oscTarget;
      private readonly ILocalSettingsService _settingsService;
+@@ -46,7 +47,7 @@ public class OscRecvService : BackgroundService
+             if (!Validator.TryValidateObject(_oscTarget, context, validationResults, validateAllProperties: true))
+             {
+                 var errorMessages = string.Join(Environment.NewLine, validationResults.Select(v => v.ErrorMessage));
+-                _logger.LogWarning($"{errorMessages} Reverting to default.");
++                //_logger.LogWarning($"{errorMessages} Reverting to default.");
+                 if (_oscTarget.DestinationAddress != "127.0.0.1")
+                 {
+                     _oscTarget.DestinationAddress = "127.0.0.1";
 @@ -108,30 +109,40 @@ public class OscRecvService : BackgroundService
  
          while (!_stoppingToken.IsCancellationRequested)
@@ -1499,10 +1649,10 @@ index d15339b..3b08577 100644
 +    }
  }
 diff --git a/VRCFaceTracking.Core/Services/ParameterSenderService.cs b/VRCFaceTracking.Core/Services/ParameterSenderService.cs
-index 4cb6fea..14a0855 100644
+index 94db813..14a0855 100644
 --- a/VRCFaceTracking.Core/Services/ParameterSenderService.cs
 +++ b/VRCFaceTracking.Core/Services/ParameterSenderService.cs
-@@ -1,4 +1,9 @@
+@@ -1,21 +1,36 @@
 -﻿using Microsoft.Extensions.Hosting;
 +using Microsoft.Extensions.Hosting;
 +using Microsoft.Extensions.Logging;
@@ -1512,8 +1662,9 @@ index 4cb6fea..14a0855 100644
 +using System.Threading.Tasks;
  using VRCFaceTracking.Core.Contracts;
  using VRCFaceTracking.Core.OSC;
- using VRCFaceTracking.Core.Params.Data;
-@@ -7,17 +12,25 @@ namespace VRCFaceTracking.Core.Services;
++using VRCFaceTracking.Core.Params.Data;
+ 
+ namespace VRCFaceTracking.Core.Services;
  
  public class ParameterSenderService : BackgroundService
  {
@@ -1527,7 +1678,6 @@ index 4cb6fea..14a0855 100644
 +
 +    private readonly ILogger<ParameterSenderService> _logger;
      private readonly OscSendService _sendService;
--    private readonly UnifiedTrackingMutator _mutator; // We don't use this but we do want DI to run its constructor
 +    private readonly UnifiedTrackingMutator _mutator; // DI side effect
 +    private List<OscMessage> _dispatchBuffer = new(256);
 +    private int _signalsThisWindow;
@@ -1545,7 +1695,7 @@ index 4cb6fea..14a0855 100644
      public bool AllParametersRelevant
      {
          get => AllParametersRelevantStatic;
-@@ -25,57 +38,129 @@ public class ParameterSenderService : BackgroundService
+@@ -23,56 +38,129 @@ public class ParameterSenderService : BackgroundService
          {
              if (AllParametersRelevantStatic == value) return;
              AllParametersRelevantStatic = value;
@@ -1562,27 +1712,27 @@ index 4cb6fea..14a0855 100644
          }
      }
 -    
--    public ParameterSenderService(OscSendService sendService, UnifiedTrackingMutator mutator)
+-    public ParameterSenderService(OscSendService sendService)
 +
 +    public ParameterSenderService(ILogger<ParameterSenderService> logger, OscSendService sendService, UnifiedTrackingMutator mutator)
      {
 +        _logger = logger;
          _sendService = sendService;
-         _mutator = mutator;
-     }
- 
--    public static void Enqueue(OscMessage message) => SendQueue.Enqueue(message);
--    public static void Clear() => SendQueue.Clear();
--    
--    protected async override Task ExecuteAsync(CancellationToken cancellationToken)
++        _mutator = mutator;
++    }
++
 +    public static void Enqueue(OscMessage message)
 +    {
 +        lock (SendQueueLock)
 +        {
 +            SendQueue.Add(message);
 +        }
-+    }
-+
+     }
+ 
+-    public static void Enqueue(OscMessage message) => SendQueue.Enqueue(message);
+-    public static void Clear() => SendQueue.Clear();
+-    
+-    protected async override Task ExecuteAsync(CancellationToken cancellationToken)
 +    public static void Clear()
      {
 +        lock (SendQueueLock)
@@ -1698,9 +1848,18 @@ index 4cb6fea..14a0855 100644
 \ No newline at end of file
 +}
 diff --git a/VRCFaceTracking.Core/UnifiedTracking.cs b/VRCFaceTracking.Core/UnifiedTracking.cs
-index 6f0b713..c41efdb 100644
+index a7be506..c41efdb 100644
 --- a/VRCFaceTracking.Core/UnifiedTracking.cs
 +++ b/VRCFaceTracking.Core/UnifiedTracking.cs
+@@ -31,7 +31,7 @@ namespace VRCFaceTracking
+         /// Container of all features and functions that mutates the incoming expression data into output data suitable for driving Unified Expressions.
+         /// </summary>
+         /// <remarks> Mutates data on update. </remarks>
+-        public static UnifiedTrackingMutator Mutator;
++        public static UnifiedTrackingMutator Mutator = null!;
+ 
+ #pragma warning disable CS0618
+         /// <summary>
 @@ -64,6 +64,11 @@ namespace VRCFaceTracking
          /// <summary>
          /// Central update function that updates all output parameter data and pushes the latest expressions from VRCFaceTracking modules into the internal expressions buffer.
@@ -1717,7 +1876,7 @@ index 6f0b713..c41efdb 100644
 \ No newline at end of file
 +}
 diff --git a/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs b/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
-index f84e741..c9bc367 100644
+index bcc4c6c..a44dcb9 100644
 --- a/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
 +++ b/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
 @@ -1,4 +1,5 @@
@@ -1727,7 +1886,15 @@ index f84e741..c9bc367 100644
  using System.Diagnostics;
  using System.Runtime.InteropServices;
  using Microsoft.Extensions.DependencyInjection;
-@@ -14,6 +15,8 @@ public class ModuleProcessMain
+@@ -7,7 +8,6 @@ using VRCFaceTracking.Core.Params.Data;
+ using VRCFaceTracking.Core.Params.Expressions;
+ using VRCFaceTracking.Core.Sandboxing;
+ using VRCFaceTracking.Core.Sandboxing.IPC;
+-using Windows.System;
+ 
+ namespace VRCFaceTracking.ModuleProcess;
+ 
+@@ -15,26 +15,91 @@ public class ModuleProcessMain
  {
      // How long in seconds we should wait for a connection to be established before giving up
      private const double CONNECTION_TIMEOUT = 60.0; // This is long because some modules like the Vive Facial Tracker software can take a long time to initialise
@@ -1736,11 +1903,10 @@ index f84e741..c9bc367 100644
      private static bool WaitForPackets = true;
      public static ModuleAssembly DefModuleAssembly;
      public static ILoggerFactory? LoggerFactory;
-@@ -21,16 +24,69 @@ public class ModuleProcessMain
+     public static ILogger<ModuleProcessMain> Logger;
      public static VrcftSandboxClient Client;
-     public static CancellationTokenSource cts = new();
- 
--    private static Queue<IpcPacket> _packetsToSend = new ();
++    public static CancellationTokenSource cts = new();
++
 +    private static readonly ConcurrentQueue<IpcPacket> _packetsToSend = new();
 +    private static readonly AutoResetEvent _packetsQueued = new(false);
 +    private static int _replyUpdateQueued;
@@ -1755,7 +1921,8 @@ index f84e741..c9bc367 100644
 +    {
 +        Interlocked.Exchange(ref _lastUpdateActivityTimestamp, Stopwatch.GetTimestamp());
 +    }
-+
+ 
+-    private static Queue<IpcPacket> _packetsToSend = new ();
 +    private static void MarkInboundPacket()
 +    {
 +        Interlocked.Exchange(ref _lastInboundPacketTimestamp, Stopwatch.GetTimestamp());
@@ -1812,16 +1979,20 @@ index f84e741..c9bc367 100644
      }
  
      public static int Main(string[] args)
-@@ -39,7 +95,7 @@ public class ModuleProcessMain
-         {
-             Logger.LogInformation("Received SIGTERM");
-             WaitForPackets = false;
--            DefModuleAssembly._updateCts.Cancel();
+     {
++        AppDomain.CurrentDomain.ProcessExit += (sender, e) =>
++        {
++            Logger.LogInformation("Received SIGTERM");
++            WaitForPackets = false;
 +            DefModuleAssembly._updateCts?.Cancel();
-             cts.Cancel();
-             cts.Token.WaitHandle.WaitOne(TimeSpan.FromSeconds(5));
-         };
-@@ -94,9 +150,6 @@ public class ModuleProcessMain
++            cts.Cancel();
++            cts.Token.WaitHandle.WaitOne(TimeSpan.FromSeconds(5));
++        };
++
+         try
+         {
+             if ( args.Length < 1 )
+@@ -85,9 +150,6 @@ public class ModuleProcessMain
  
      static int VrcftMain(string modulePath, int serverPortNumber)
      {
@@ -1831,7 +2002,14 @@ index f84e741..c9bc367 100644
          ServiceProvider serviceProvider = new ServiceCollection()
          .AddLogging((loggingBuilder) => loggingBuilder
                  .ClearProviders()
-@@ -111,9 +164,11 @@ public class ModuleProcessMain
+@@ -96,19 +158,21 @@ public class ModuleProcessMain
+                 // .AddSentry(o =>
+                 //     o.Dsn =
+                 //     "https://444b0799dd2b670efa85d866c8c12134@o4506152235237376.ingest.us.sentry.io/4506152246575104")
+-                .AddProvider(new ProxyLoggerProvider(DispatcherQueue.GetForCurrentThread()))
++                .AddProvider(new ProxyLoggerProvider())
+             )
+         .BuildServiceProvider();
  
          LoggerFactory = serviceProvider.GetService<ILoggerFactory>();
          Logger = LoggerFactory.CreateLogger<ModuleProcessMain>();
@@ -1844,7 +2022,12 @@ index f84e741..c9bc367 100644
          Client = new VrcftSandboxClient(serverPortNumber, LoggerFactory);
  
          // Bind the log function so that we can forward log messages to VRCFT's main process
-@@ -126,6 +181,8 @@ public class ModuleProcessMain
+-        ProxyLogger.OnLog += (LogLevel level, string msg) =>
++        ProxyLogger.OnLog += (level, msg) =>
+         {
+             var pkt = new EventLogPacket(level, msg);
+             Client.SendData(pkt);
+@@ -117,6 +181,8 @@ public class ModuleProcessMain
          // Try loading the module
          DefModuleAssembly = new ModuleAssembly(Logger, LoggerFactory, modulePath);
          DefModuleAssembly.TryLoadAssembly();
@@ -1853,7 +2036,7 @@ index f84e741..c9bc367 100644
  
          // Initialise to invalid state
          UnifiedTracking.Data = new() {
-@@ -152,10 +209,8 @@ public class ModuleProcessMain
+@@ -143,10 +209,8 @@ public class ModuleProcessMain
              UnifiedTracking.Data.Shapes[i].Weight = 0xFFFFFFFF;
          }
  
@@ -1865,7 +2048,7 @@ index f84e741..c9bc367 100644
  
              // Handle packets
              switch ( packet.GetPacketType() )
-@@ -168,7 +223,7 @@ public class ModuleProcessMain
+@@ -159,7 +223,7 @@ public class ModuleProcessMain
                              eyeAvailable        = result.SupportsEye,
                              expressionAvailable = result.SupportsExpression
                          };
@@ -1874,7 +2057,7 @@ index f84e741..c9bc367 100644
                          break;
                      }
                  case IpcPacket.PacketType.EventInit:
-@@ -191,14 +246,19 @@ public class ModuleProcessMain
+@@ -182,14 +246,19 @@ public class ModuleProcessMain
                          }
                          
                          DefModuleAssembly._updateCts = new CancellationTokenSource();
@@ -1900,7 +2083,7 @@ index f84e741..c9bc367 100644
                          
                          var pktNew = new ReplyInitPacket()
                          {
-@@ -207,7 +267,8 @@ public class ModuleProcessMain
+@@ -198,7 +267,8 @@ public class ModuleProcessMain
                              ModuleInformationName   = DefModuleAssembly.TrackingModule.ModuleInformation.Name,
                              IconDataStreams         = DefModuleAssembly.TrackingModule.ModuleInformation.StaticImages
                          };
@@ -1910,7 +2093,7 @@ index f84e741..c9bc367 100644
                          break;
                      }
  
-@@ -243,7 +304,7 @@ public class ModuleProcessMain
+@@ -234,7 +304,7 @@ public class ModuleProcessMain
                      {
                          // Logger.LogDebug("EventUpdate");
                          var pkt = new ReplyUpdatePacket();
@@ -1919,7 +2102,7 @@ index f84e741..c9bc367 100644
                          break;
                      }
  
-@@ -265,35 +326,53 @@ public class ModuleProcessMain
+@@ -256,35 +326,53 @@ public class ModuleProcessMain
          // Start the connection
          Client.Connect(modulePath);
          Logger.LogInformation("Initializing {module}", DefModuleAssembly.Assembly.ToString());
@@ -1927,7 +2110,8 @@ index f84e741..c9bc367 100644
 -        stopwatch.Start();
          
          // Loop infinitely while we wait for commands
-         while ( WaitForPackets && !cts.IsCancellationRequested)
+-        while ( WaitForPackets )
++        while ( WaitForPackets && !cts.IsCancellationRequested)
          {
 -            if ( stopwatch.Elapsed.TotalSeconds > CONNECTION_TIMEOUT )
 +            if (IsWaitingForInitialHostTraffic() &&
@@ -1982,7 +2166,7 @@ index f84e741..c9bc367 100644
  
          if (OperatingSystem.IsWindows())
          {
-@@ -303,4 +382,29 @@ public class ModuleProcessMain
+@@ -294,4 +382,29 @@ public class ModuleProcessMain
          Environment.Exit(ModuleProcessExitCodes.OK);
          return ModuleProcessExitCodes.OK;
      }

@@ -1,4 +1,4 @@
-﻿diff --git a/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs b/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs
+diff --git a/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs b/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs
 index f02692a..f95ccc2 100644
 --- a/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs
 +++ b/src/VRCFaceTracking.Baballonia/BabbleExpressions.cs
@@ -24,7 +24,7 @@ index f02692a..f95ccc2 100644
 +                group => group.Select(entry => entry.Item1).Distinct().ToArray());
  }
 diff --git a/src/VRCFaceTracking.Baballonia/BabbleOSC.cs b/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
-index 6c07199..97e454f 100644
+index 6c07199..2245ae9 100644
 --- a/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
 +++ b/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
 @@ -1,15 +1,25 @@
@@ -279,14 +279,15 @@ index 6c07199..97e454f 100644
 -                    ConfigureReceiver();
 +                    RecreateReceiver();
 +                    Thread.Sleep(RebindBackoff);
-+                }
-+            }
+                 }
+             }
+-            catch (Exception)
 +            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
 +            {
 +                if (Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastPacketTimestamp)) >= StaleDataThreshold)
 +                {
-+                    var shouldRebind = Interlocked.Increment(ref _consecutiveStaleTimeouts) >= 2;
-+                    HandleStaleData(rebindReceiver: shouldRebind);
++                    var rebindReceiver = Interlocked.Increment(ref _consecutiveStaleTimeouts) >= 2;
++                    HandleStaleData(rebindReceiver);
 +                }
 +                continue;
 +            }
@@ -305,7 +306,8 @@ index 6c07199..97e454f 100644
 +                Thread.Sleep(RebindBackoff);
 +            }
 +            catch (Exception ex) when (_loop)
-+            {
+             {
+-                // ignore
 +                _consecutiveReceiveErrors++;
 +                if (_consecutiveReceiveErrors == 1 || _consecutiveReceiveErrors % 20 == 0)
 +                    _logger.LogWarning(ex, "BabbleEyeOSC unexpected receive fault. Rebinding receiver.");
@@ -318,14 +320,18 @@ index 6c07199..97e454f 100644
 +
 +    private void HandleStaleData(bool rebindReceiver)
 +    {
-+        var frameSyncWasActive = Interlocked.Exchange(ref _frameSyncActive, 0) == 1;
++        var hadFrameSync = Interlocked.Exchange(ref _frameSyncActive, 0) == 1;
 +        Interlocked.Exchange(ref _pendingImmediateUpdate, 0);
 +        if (Interlocked.Exchange(ref _staleStateActive, 1) == 0)
++        {
 +            _logger.LogWarning("BabbleEyeOSC data flow stalled. Neutralizing eye state{rebindSuffix}{frameSyncSuffix}.",
 +                rebindReceiver ? " and rebinding receiver" : string.Empty,
-+                frameSyncWasActive ? " and disabling frame sync" : string.Empty);
++                hadFrameSync ? " and disabling frame sync" : string.Empty);
++        }
 +        else if (rebindReceiver)
++        {
 +            _logger.LogWarning("BabbleEyeOSC data flow remains stalled. Rebinding receiver.");
++        }
 +
 +        NeutralizeEyeState();
 +        _onDataUpdated?.Invoke();
@@ -365,43 +371,37 @@ index 6c07199..97e454f 100644
 +    {
 +        if (Volatile.Read(ref _frameSyncActive) == 1)
 +        {
-+            var frameReadyAge = Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastFrameReadyTimestamp));
-+            if (frameReadyAge > FrameReadyTimeout)
++            var elapsed = Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastFrameReadyTimestamp));
++            if (!(elapsed > FrameReadyTimeout))
 +            {
-+                if (Interlocked.Exchange(ref _frameSyncActive, 0) == 1)
-+                {
-+                    _logger.LogWarning(
-+                        "BabbleEyeOSC frame sync timed out after {elapsedMs} ms. Falling back to per-packet updates until frameReady resumes.",
-+                        frameReadyAge.TotalMilliseconds);
-                 }
-+
-+                Interlocked.Exchange(ref _pendingImmediateUpdate, 0);
-             }
--            catch (Exception)
-+            else
-             {
--                // ignore
 +                Interlocked.Exchange(ref _pendingImmediateUpdate, 1);
 +                return;
              }
-         }
++
++            if (Interlocked.Exchange(ref _frameSyncActive, 0) == 1)
++            {
++                _logger.LogWarning("BabbleEyeOSC frame sync timed out after {elapsedMs} ms. Falling back to per-packet updates until frameReady resumes.",
++                    elapsed.TotalMilliseconds);
++            }
++            Interlocked.Exchange(ref _pendingImmediateUpdate, 0);
++        }
 +
 +        _onDataUpdated?.Invoke();
 +    }
 +
 +    private void HandleFrameReady()
 +    {
-+        var now = Stopwatch.GetTimestamp();
-+        var frameSyncWasInactive = Interlocked.Exchange(ref _frameSyncActive, 1) == 0;
-+        Interlocked.Exchange(ref _lastFrameReadyTimestamp, now);
-+
-+        if (frameSyncWasInactive && Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastPacketTimestamp)) < TimeSpan.FromSeconds(2))
++        var timestamp = Stopwatch.GetTimestamp();
++        var wasInactive = Interlocked.Exchange(ref _frameSyncActive, 1) == 0;
++        Interlocked.Exchange(ref _lastFrameReadyTimestamp, timestamp);
++        if (wasInactive && Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastPacketTimestamp)) < TimeSpan.FromSeconds(2))
++        {
 +            _logger.LogInformation("BabbleEyeOSC frame sync resumed.");
-+
+         }
 +        var frameReadyCount = Interlocked.Increment(ref _frameReadyCount);
 +        if (frameReadyCount == 1 || Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastFrameReadyLogTimestamp)) >= TimeSpan.FromSeconds(5))
 +        {
-+            Interlocked.Exchange(ref _lastFrameReadyLogTimestamp, now);
++            Interlocked.Exchange(ref _lastFrameReadyLogTimestamp, timestamp);
 +            _logger.LogInformation("BabbleEyeOSC frame sync stats: frameReady={frameReady} packets={packets}", frameReadyCount, Volatile.Read(ref _receivedPacketCount));
 +        }
 +
