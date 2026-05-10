@@ -1,0 +1,13 @@
+diff --git a/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs b/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs
+--- a/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs
++++ b/src/Baballonia/ViewModels/SplitViewPane/HomePageViewModel.cs
+@@ -316,9 +316,6 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+         private void ClearPreview()
+         {
+             DisposeQueuedPreview();
+-            IsCameraRunning = false;
+-            StartButtonEnabled = true;
+-            StopButtonEnabled = false;
+             Bitmap = null;
+             LogPreviewState("cleared", force: true);
+         }

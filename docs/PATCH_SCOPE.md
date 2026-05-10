@@ -37,3 +37,11 @@ Patch size: 15 files.
 - Callback into VRCFT for immediate update.
 
 Patch size: 3 files.
+
+## 04 Baballonia Eye Preview State Fix
+
+- Keeps preview-only clearing from marking an active camera as stopped.
+- Restores crop-mode eye preview recovery after the window preview has been cleared.
+- Included in patch `01` for clean installs; patch `04` is only for already-patched Baballonia trees.
+
+Patch size: 1 file.

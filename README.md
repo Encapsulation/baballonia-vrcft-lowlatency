@@ -1,5 +1,13 @@
 # Baballonia VRCFT Low Latency Patch Set
 
+Existing patched Baballonia tree:
+
+```powershell
+curl.exe -L https://raw.githubusercontent.com/Encapsulation/baballonia-vrcft-lowlatency/main/patches/04-baballonia-eye-preview-state-fix.patch | git apply -
+```
+
+Clean install:
+
 ```powershell
 git clone https://github.com/Project-Babble/Baballonia.git
 git clone https://github.com/Project-Babble/VRCFaceTracking.git

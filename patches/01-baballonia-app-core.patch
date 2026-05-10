@@ -5160,7 +5160,7 @@ index 062df52..ff1f586 100644
              }
              else
              {
-@@ -183,138 +201,257 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
+@@ -183,138 +201,254 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
  
          public void FaceNewImageUpdateEventHandler(FacePipelineEvents.NewFrameEvent e)
          {
@@ -5328,9 +5328,6 @@ index 062df52..ff1f586 100644
 +        private void ClearPreview()
 +        {
 +            DisposeQueuedPreview();
-+            IsCameraRunning = false;
-+            StartButtonEnabled = true;
-+            StopButtonEnabled = false;
 +            Bitmap = null;
 +            LogPreviewState("cleared", force: true);
 +        }
