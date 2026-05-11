@@ -5,8 +5,8 @@ Clean install, apply, and build:
 ```powershell
 mkdir BaballoniaVRCFTPatch
 cd .\BaballoniaVRCFTPatch
-curl.exe -L -o setup-clean-exact.ps1 https://raw.githubusercontent.com/Encapsulation/baballonia-vrcft-lowlatency/main/scripts/setup-clean-exact.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-clean-exact.ps1 -Build
+git clone https://github.com/Encapsulation/baballonia-vrcft-lowlatency.git BaballoniaVRCFT-CoreShare
+powershell -NoProfile -ExecutionPolicy Bypass -File .\BaballoniaVRCFT-CoreShare\scripts\setup-clean-exact.ps1 -Build
 ```
 
 Existing patched Baballonia tree:
