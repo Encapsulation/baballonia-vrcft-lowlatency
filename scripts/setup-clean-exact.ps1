@@ -50,9 +50,15 @@ function Resolve-ShareRoot {
 
     $path = Join-Path $WorkRoot 'BaballoniaVRCFT-CoreShare'
     Ensure-Repo -Url $shareRepoUrl -Path $path
-    Run-Git @('-C', $path, 'fetch', 'origin', 'main')
-    Run-Git @('-C', $path, 'checkout', 'main')
-    Run-Git @('-C', $path, 'pull', '--ff-only', 'origin', 'main')
+    Push-Location $path
+    try {
+        Run-Git fetch origin main
+        Run-Git checkout main
+        Run-Git pull --ff-only origin main
+    }
+    finally {
+        Pop-Location
+    }
     return $path
 }
 
