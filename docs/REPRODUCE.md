@@ -2,7 +2,16 @@
 
 ## Code
 
-Clone both upstream apps, checkout the listed baseline commits, then apply the full patch set.
+Recommended:
+
+```powershell
+mkdir BaballoniaVRCFTPatch
+cd .\BaballoniaVRCFTPatch
+curl.exe -L -o setup-clean-exact.ps1 https://raw.githubusercontent.com/Encapsulation/baballonia-vrcft-lowlatency/main/scripts/setup-clean-exact.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-clean-exact.ps1 -Build
+```
+
+Manual:
 
 ```powershell
 git clone https://github.com/Project-Babble/Baballonia.git
@@ -19,6 +28,7 @@ git checkout 09539ec4d458ac6a37c5a620fd025c9042bf7933
 ```
 
 This applies patch `01`, patch `02b`, patch `03`, and patch `02`.
+Patch `02b` is submodule-only. Do not apply it to the standalone VRCFaceTracking app repo.
 
 ## Build Checks
 

@@ -2,6 +2,24 @@
 
 These checks were run from clean upstream checkouts with the public patch files in this repo.
 
+## 0. Recommended Setup Wrapper
+
+Command:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-clean-exact.ps1 -WorkRoot <clean-work-root> -Build
+```
+
+Verified result:
+
+- Clones/checks out Baballonia at `234a393f2f7ca29ccb8aeee0069e2cae155af628`.
+- Applies patch `01`, patch `02b` inside the pinned `src/VRCFaceTracking` submodule, and patch `03`.
+- Clones/checks out standalone VRCFaceTracking at `09539ec4d458ac6a37c5a620fd025c9042bf7933`.
+- Applies patch `02` only to standalone VRCFaceTracking.
+- Re-running the setup wrapper reports the patches as already applied.
+- Running the standalone VRCFT patch script from Baballonia's submodule is rejected.
+- Baballonia publish, `VRCFaceTracking.Baballonia` build, and standalone VRCFaceTracking build all complete with `0 Error(s)`.
+
 ## 1. Baballonia App, Pinned VRCFT Submodule, And Module
 
 Baseline: `Project-Babble/Baballonia` at `234a393f2f7ca29ccb8aeee0069e2cae155af628`.

@@ -1,12 +1,21 @@
 # Baballonia VRCFT Low Latency Patch Set
 
+Clean install, apply, and build:
+
+```powershell
+mkdir BaballoniaVRCFTPatch
+cd .\BaballoniaVRCFTPatch
+curl.exe -L -o setup-clean-exact.ps1 https://raw.githubusercontent.com/Encapsulation/baballonia-vrcft-lowlatency/main/scripts/setup-clean-exact.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-clean-exact.ps1 -Build
+```
+
 Existing patched Baballonia tree:
 
 ```powershell
 curl.exe -L https://raw.githubusercontent.com/Encapsulation/baballonia-vrcft-lowlatency/main/patches/04-baballonia-eye-preview-state-fix.patch | git apply -
 ```
 
-Clean install:
+Manual clean install:
 
 ```powershell
 git clone https://github.com/Project-Babble/Baballonia.git
@@ -29,3 +38,5 @@ dotnet build .\src\VRCFaceTracking.Baballonia\VRCFaceTracking.Baballonia.csproj 
 cd ..\VRCFaceTracking
 dotnet build .\VRCFaceTracking.sln -c Release
 ```
+
+Patch `02b` is only for Baballonia's pinned `src\VRCFaceTracking` submodule. Standalone VRCFaceTracking uses patch `02` at `09539ec4d458ac6a37c5a620fd025c9042bf7933`.

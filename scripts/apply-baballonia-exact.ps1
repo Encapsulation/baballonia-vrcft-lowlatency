@@ -4,38 +4,39 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Run-Git {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    & git @Args
-    if ($LASTEXITCODE -ne 0) {
-        throw "git $($Args -join ' ') failed"
-    }
-}
+. (Join-Path $PSScriptRoot '_patch-helpers.ps1')
+
+$expectedBaballoniaCommit = '234a393f2f7ca29ccb8aeee0069e2cae155af628'
+$expectedSubmoduleCommit = 'b4b39da5c9fe048c960aa3b9e56742834df6ff36'
 
 $patch1 = Join-Path $ShareRoot 'patches\01-baballonia-app-core.patch'
 $patch2b = Join-Path $ShareRoot 'patches\02b-baballonia-vrcft-submodule-core.patch'
 $patch3 = Join-Path $ShareRoot 'patches\03-vrcft-babble-module-core.patch'
 
-Run-Git submodule update --init --recursive
+$repoRoot = Assert-RepositoryRoot `
+    -RepoName 'Baballonia' `
+    -RequiredPaths @('src\Baballonia.Desktop\Baballonia.Desktop.csproj', 'src\VRCFaceTracking.Baballonia\VRCFaceTracking.Baballonia.csproj', '.gitmodules')
+Assert-ExactHead -RepoName 'Baballonia' -ExpectedCommit $expectedBaballoniaCommit
 
-Run-Git apply --check $patch1
+Invoke-Git submodule update --init --recursive
+
 Push-Location 'src\VRCFaceTracking'
 try {
-    Run-Git apply --check $patch2b
+    Assert-ExactHead -RepoName 'Baballonia src\VRCFaceTracking submodule' -ExpectedCommit $expectedSubmoduleCommit
 }
 finally {
     Pop-Location
 }
-Run-Git apply --check $patch3
 
-Run-Git apply $patch1
+Apply-GitPatchOnce -PatchPath $patch1 -PatchName 'patch 01 (Baballonia app)'
 Push-Location 'src\VRCFaceTracking'
 try {
-    Run-Git apply $patch2b
+    Apply-GitPatchOnce -PatchPath $patch2b -PatchName 'patch 02b (Baballonia pinned VRCFaceTracking submodule)'
 }
 finally {
     Pop-Location
 }
-Run-Git apply $patch3
+Apply-GitPatchOnce -PatchPath $patch3 -PatchName 'patch 03 (VRCFT-Babble module)'
 
-Write-Host 'Applied Baballonia app, VRCFaceTracking submodule, and Babble module exact fork patches.'
+Set-Location $repoRoot
+Write-Host 'Baballonia exact patch flow complete.'

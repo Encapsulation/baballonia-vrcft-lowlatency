@@ -19,6 +19,7 @@ Patch size: 49 files.
 - Sandbox host/module IPC changes.
 - OSC send timing and lower-latency handoff path.
 - Module process priority behavior.
+- Apply only to standalone VRCFaceTracking at `09539ec4d458ac6a37c5a620fd025c9042bf7933`.
 
 Patch size: 15 files.
 
@@ -26,6 +27,7 @@ Patch size: 15 files.
 
 - Same host/SDK changes as patch 02.
 - Ported against Baballonia's pinned `src/VRCFaceTracking` submodule baseline.
+- Apply only inside Baballonia's `src/VRCFaceTracking` submodule at `b4b39da5c9fe048c960aa3b9e56742834df6ff36`.
 
 Patch size: 15 files.
 
