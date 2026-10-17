@@ -1,0 +1,504 @@
+diff --git a/VRCFaceTracking.Core/MainStandalone.cs b/VRCFaceTracking.Core/MainStandalone.cs
+index 7ca3317..6f3defa 100644
+--- a/VRCFaceTracking.Core/MainStandalone.cs
++++ b/VRCFaceTracking.Core/MainStandalone.cs
+@@ -76,6 +76,7 @@ public class MainStandalone : IMainService
+         if (isWindows)
+         {
+             Utils.TimeBeginPeriod(1);
++            Utils.TryDisablePowerThrottling();
+         }
+ 
+         return Task.CompletedTask;
+diff --git a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
+index 0ac3aff..c9dfb8b 100644
+--- a/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
++++ b/VRCFaceTracking.Core/Sandboxing/IPC/ReplyUpdatePacket.cs
+@@ -12,6 +12,7 @@ public class ReplyUpdatePacket : IpcPacket
+     private const int ScalarFloatCount = 16;
+     private const int PayloadFloatCount = ScalarFloatCount + EXPRESSION_COUNT;
+ 
++    private byte[]? _sendBuffer;
+     private UpdateDataContiguous _contiguousUnifiedData = new ()
+     {
+         Expression_Shapes = new float[EXPRESSION_COUNT]
+@@ -82,7 +83,9 @@ public class ReplyUpdatePacket : IpcPacket
+             _contiguousUnifiedData.Expression_Shapes[i] = UnifiedTracking.Data.Shapes[i].Weight;
+         }
+ 
+-        byte[] finalDataStream = new byte[packetSize];
++        // The buffer is reused per packet instance. That only helps the long-lived _directReplyUpdate instance in
++        // ModuleProcessMain (sent synchronously under its send lock); other ReplyUpdatePackets are one-shot and allocate once.
++        var finalDataStream = _sendBuffer ??= new byte[packetSize];
+         Buffer.BlockCopy(HANDSHAKE_MAGIC, 0, finalDataStream, 0, SIZE_PACKET_MAGIC);
+         BinaryPrimitives.WriteUInt32LittleEndian(finalDataStream.AsSpan(4, sizeof(uint)), (uint)GetPacketType());
+         BinaryPrimitives.WriteInt32LittleEndian(finalDataStream.AsSpan(8, sizeof(int)), payloadSize);
+diff --git a/VRCFaceTracking.Core/Sandboxing/UdpFullDuplex.cs b/VRCFaceTracking.Core/Sandboxing/UdpFullDuplex.cs
+index f753581..d8f5b0a 100644
+--- a/VRCFaceTracking.Core/Sandboxing/UdpFullDuplex.cs
++++ b/VRCFaceTracking.Core/Sandboxing/UdpFullDuplex.cs
+@@ -27,11 +27,11 @@ public class UdpFullDuplex : IDisposable
+     private IPEndPoint          _remoteIpEndPoint;
+     private Queue<byte[]>       _queue;
+     private ManualResetEvent    _closingEvent;
+-    private bool                _closing                = false;
++    private volatile bool       _closing                = false;
+     protected bool              _isConnected            = false;
+     protected SimpleEventBus    _eventBus;
+     private bool                _isCallbackRegistered   = false;
+-    private Task                _receiveThread;
++    private Thread              _receiveThread;
+     private int                 _maximumTransferUnit = ETHERNET_FRAME_SIZE;
+     private CancellationTokenSource _cts = new();
+     public OnReceiveShouldBeQueued OnReceiveShouldBeQueued;
+@@ -95,7 +95,7 @@ public class UdpFullDuplex : IDisposable
+             _remoteIpEndPoint = remoteIpEndPoint;
+         }
+ 
+-        _receivingUdpClient.Client.ReceiveTimeout   = 10;
++        _receivingUdpClient.Client.ReceiveTimeout   = 0; // dedicated thread does a blocking receive; Close() unblocks it
+         _receivingUdpClient.Client.SendTimeout      = 10;
+         _maximumTransferUnit = Math.Min(_receivingUdpClient.Client.ReceiveBufferSize, _receivingUdpClient.Client.SendBufferSize);
+         _receivingUdpClient.Client.ReceiveBufferSize = 1024 * 1024;
+@@ -103,34 +103,56 @@ public class UdpFullDuplex : IDisposable
+         // setup first async event
+         // AsyncCallback callBack = new AsyncCallback(ReceiveCallback);
+         // _receivingUdpClient.BeginReceive(callBack, null);
+-        _receiveThread = Task.Run(ListenAsync, _cts.Token);
++        _receiveThread = new Thread(ListenBlocking)
++        {
++            Name = "VRCFT UDP Receive",
++            IsBackground = true,
++            Priority = ThreadPriority.AboveNormal
++        };
++        _receiveThread.Start();
+     }
+ 
+-    private async Task ListenAsync()
++    private void ListenBlocking()
+     {
++        var window = new byte[65535];
++        // Template endpoint reused for every receive; ReceiveFrom does not mutate it (it returns a new EndPoint).
++        EndPoint remoteTemplate = new IPEndPoint(IPAddress.Any, 0);
+         while (!_cts.IsCancellationRequested)
+         {
+             try
+             {
+-                var result = await _receivingUdpClient.ReceiveAsync(_cts.Token);
+-            
+-                if (result.Buffer != null && result.Buffer.Length > 0)
++                EndPoint remote = remoteTemplate;
++                var len = _receivingUdpClient.Client.ReceiveFrom(window, ref remote);
++
++                if (len > 0)
+                 {
+-                    OnBytesReceived(result.Buffer, result.RemoteEndPoint);
++                    var buffer = new byte[len];
++                    Buffer.BlockCopy(window, 0, buffer, 0, len);
++                    OnBytesReceived(buffer, (IPEndPoint)remote);
+                 }
+             }
+-            catch (OperationCanceledException)
++            catch (ObjectDisposedException)
+             {
+-                // Cancelled, exit loop
++                // Socket closed. This happens when closing the listener
+                 break;
+             }
+-            catch (ObjectDisposedException)
++            catch (SocketException)
+             {
+-                // Ignore if disposed. This happens when closing the listener
++                // This happens when a module terminates / crashes / is shut down.
++                // While closing, a Close() mid-receive surfaces as Interrupted / NotSocket / OperationAborted
++                // (any code is treated the same then): stop.
++                if (_cts.IsCancellationRequested || _closing)
++                    break;
++
++                // Unexpected error while still open: do not spin hot on a persistent failure.
++                Thread.Sleep(1);
+             }
+-            catch (SocketException e)
++            catch (Exception)
+             {
+-                // This happens when a module terminates / crashes / is shut down
++                if (_cts.IsCancellationRequested || _closing)
++                    break;
++
++                Thread.Sleep(1);
+             }
+         }
+     }
+diff --git a/VRCFaceTracking.Core/Services/ParameterSenderService.cs b/VRCFaceTracking.Core/Services/ParameterSenderService.cs
+index 14a0855..fe05489 100644
+--- a/VRCFaceTracking.Core/Services/ParameterSenderService.cs
++++ b/VRCFaceTracking.Core/Services/ParameterSenderService.cs
+@@ -111,14 +111,54 @@ public class ParameterSenderService : BackgroundService
+     protected override async Task ExecuteAsync(CancellationToken cancellationToken)
+     {
+         var statsTask = LogStatsAsync(cancellationToken);
++        var loopDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++
++        // Dedicated high-priority thread: avoids the thread pool hop between the signal and the send.
++        var thread = new Thread(() =>
++        {
++            try
++            {
++                SenderLoop(cancellationToken);
++            }
++            finally
++            {
++                loopDone.TrySetResult();
++            }
++        })
++        {
++            Name = "VRCFT Parameter Sender",
++            IsBackground = true,
++            Priority = ThreadPriority.AboveNormal
++        };
++        thread.Start();
++
++        try
++        {
++            await loopDone.Task;
++        }
++        finally
++        {
++            try
++            {
++                await statsTask;
++            }
++            catch (OperationCanceledException)
++            {
++                // Normal shutdown.
++            }
++        }
++    }
++
++    private void SenderLoop(CancellationToken cancellationToken)
++    {
+         while (!cancellationToken.IsCancellationRequested)
+         {
+             try
+             {
+-                await PendingUpdateSignal.WaitAsync(cancellationToken);
++                PendingUpdateSignal.Wait(cancellationToken);
+                 Interlocked.Increment(ref _signalsThisWindow);
+ 
+-                await UnifiedTracking.UpdateData(cancellationToken);
++                UnifiedTracking.UpdateData(cancellationToken).GetAwaiter().GetResult();
+ 
+                 lock (SendQueueLock)
+                 {
+@@ -128,10 +168,20 @@ public class ParameterSenderService : BackgroundService
+                     (_dispatchBuffer, SendQueue) = (SendQueue, _dispatchBuffer);
+                 }
+ 
+-                await _sendService.Send(_dispatchBuffer, cancellationToken);
+-                Interlocked.Increment(ref _batchesThisWindow);
+-                Interlocked.Add(ref _messagesThisWindow, _dispatchBuffer.Count);
+-                _dispatchBuffer.Clear();
++                try
++                {
++                    _sendService.Send(_dispatchBuffer, cancellationToken).GetAwaiter().GetResult();
++                    Interlocked.Increment(ref _batchesThisWindow);
++                    Interlocked.Add(ref _messagesThisWindow, _dispatchBuffer.Count);
++                }
++                finally
++                {
++                    _dispatchBuffer.Clear();
++                }
++            }
++            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++            {
++                break;
+             }
+             catch (Exception e)
+             {
+@@ -153,14 +203,5 @@ public class ParameterSenderService : BackgroundService
+                 });
+             }
+         }
+-
+-        try
+-        {
+-            await statsTask;
+-        }
+-        catch (OperationCanceledException)
+-        {
+-            // Normal shutdown.
+-        }
+     }
+ }
+diff --git a/VRCFaceTracking.Core/Utils.cs b/VRCFaceTracking.Core/Utils.cs
+index c091bd2..00f3945 100644
+--- a/VRCFaceTracking.Core/Utils.cs
++++ b/VRCFaceTracking.Core/Utils.cs
+@@ -21,6 +21,47 @@ public static class Utils
+     [DllImport("winmm.dll", EntryPoint = "timeEndPeriod", SetLastError = true)]
+     public static extern uint TimeEndPeriod(uint uMilliseconds);
+ 
++    // Opt out of Windows power throttling (EcoQoS) and timer coalescing. Best-effort.
++    [StructLayout(LayoutKind.Sequential)]
++    private struct ProcessPowerThrottlingState
++    {
++        public uint Version;
++        public uint ControlMask;
++        public uint StateMask;
++    }
++
++    [DllImport("kernel32.dll", SetLastError = true)]
++    [return: MarshalAs(UnmanagedType.Bool)]
++    private static extern bool SetProcessInformation(IntPtr hProcess, int processInformationClass, ref ProcessPowerThrottlingState processInformation, int processInformationSize);
++
++    public static bool TryDisablePowerThrottling()
++    {
++        if (!OperatingSystem.IsWindows())
++            return false;
++
++        try
++        {
++            const int ProcessPowerThrottling = 4;
++            const uint ProcessPowerThrottlingCurrentVersion = 1;
++            const uint ProcessPowerThrottlingExecutionSpeed = 0x1;
++            const uint ProcessPowerThrottlingIgnoreTimerResolution = 0x4;
++
++            var state = new ProcessPowerThrottlingState
++            {
++                Version = ProcessPowerThrottlingCurrentVersion,
++                ControlMask = ProcessPowerThrottlingExecutionSpeed | ProcessPowerThrottlingIgnoreTimerResolution,
++                StateMask = 0
++            };
++            using var currentProcess = Process.GetCurrentProcess();
++            return SetProcessInformation(currentProcess.Handle, ProcessPowerThrottling, ref state, Marshal.SizeOf<ProcessPowerThrottlingState>());
++        }
++        catch
++        {
++            // Best-effort only.
++            return false;
++        }
++    }
++
+     // Proc memory read helpers
+     public const int PROCESS_VM_READ = 0x0010;
+ 
+diff --git a/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs b/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
+index c9bc367..fa186a8 100644
+--- a/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
++++ b/VRCFaceTracking.ModuleProcess/ModuleProcessMain.cs
+@@ -16,7 +16,7 @@ public class ModuleProcessMain
+     // How long in seconds we should wait for a connection to be established before giving up
+     private const double CONNECTION_TIMEOUT = 60.0; // This is long because some modules like the Vive Facial Tracker software can take a long time to initialise
+     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(CONNECTION_TIMEOUT);
+-    private static readonly TimeSpan PushUpdateWatchdog = TimeSpan.FromMilliseconds(25);
++    private static readonly TimeSpan PushUpdateWatchdog = TimeSpan.FromMilliseconds(15);
+     private static bool WaitForPackets = true;
+     public static ModuleAssembly DefModuleAssembly;
+     public static ILoggerFactory? LoggerFactory;
+@@ -27,12 +27,15 @@ public class ModuleProcessMain
+     private static readonly ConcurrentQueue<IpcPacket> _packetsToSend = new();
+     private static readonly AutoResetEvent _packetsQueued = new(false);
+     private static int _replyUpdateQueued;
++    private static long _lastDirectSendWarnTick;
+     private static long _lastUpdateActivityTimestamp = Stopwatch.GetTimestamp();
+     private static long _lastInboundPacketTimestamp = Stopwatch.GetTimestamp();
+     private static int _pushWatchdogFireCount;
+     private static int _replyUpdateEnqueueCount;
+     private static long _replyUpdateEnqueueLogTimestamp = Stopwatch.GetTimestamp();
+     private static int _moduleInitialized;
++    private static readonly object _sendLock = new();
++    private static readonly ReplyUpdatePacket _directReplyUpdate = new();
+ 
+     private static void MarkUpdateActivity()
+     {
+@@ -44,6 +47,18 @@ public class ModuleProcessMain
+         Interlocked.Exchange(ref _lastInboundPacketTimestamp, Stopwatch.GetTimestamp());
+     }
+ 
++    private static void LogReplyUpdateEnqueue()
++    {
++        MarkUpdateActivity();
++        var enqueueCount = Interlocked.Increment(ref _replyUpdateEnqueueCount);
++        var now = Stopwatch.GetTimestamp();
++        if (enqueueCount == 1 || Stopwatch.GetElapsedTime(Interlocked.Read(ref _replyUpdateEnqueueLogTimestamp)) >= TimeSpan.FromSeconds(5))
++        {
++            Interlocked.Exchange(ref _replyUpdateEnqueueLogTimestamp, now);
++            Logger?.LogInformation("ReplyUpdate enqueue stats: count={count} connected={connected}", enqueueCount, Client?.IsConnected);
++        }
++    }
++
+     private static void EnqueuePacket(IpcPacket packet)
+     {
+         if (packet.GetPacketType() == IpcPacket.PacketType.ReplyUpdate)
+@@ -51,22 +66,54 @@ public class ModuleProcessMain
+             if (Interlocked.Exchange(ref _replyUpdateQueued, 1) == 1)
+                 return;
+ 
+-            MarkUpdateActivity();
+-            var enqueueCount = Interlocked.Increment(ref _replyUpdateEnqueueCount);
+-            var now = Stopwatch.GetTimestamp();
+-            if (enqueueCount == 1 || Stopwatch.GetElapsedTime(Interlocked.Read(ref _replyUpdateEnqueueLogTimestamp)) >= TimeSpan.FromSeconds(5))
+-            {
+-                Interlocked.Exchange(ref _replyUpdateEnqueueLogTimestamp, now);
+-                Logger?.LogInformation("ReplyUpdate enqueue stats: count={count} connected={connected}", enqueueCount, Client?.IsConnected);
+-            }
++            LogReplyUpdateEnqueue();
+         }
+ 
+         _packetsToSend.Enqueue(packet);
+         _packetsQueued.Set();
+     }
+ 
++    private static void SendPacket(IpcPacket packet)
++    {
++        lock (_sendLock)
++        {
++            Client.SendData(packet);
++        }
++    }
++
+     private static void QueueImmediateUpdate()
+     {
++        // Push-capable modules: send straight from the caller's thread, skipping the wake-up of the main loop.
++        if (DefModuleAssembly?.TrackingModule?.SupportsPushUpdates == true &&
++            Volatile.Read(ref _moduleInitialized) == 1 &&
++            Client?.IsConnected == true)
++        {
++            if (Interlocked.Exchange(ref _replyUpdateQueued, 1) == 1)
++                return; // An update is already pending and will read the latest data when it is built.
++
++            LogReplyUpdateEnqueue();
++            try
++            {
++                lock (_sendLock)
++                {
++                    // Clear before building so data written while we send triggers a fresh packet.
++                    Interlocked.Exchange(ref _replyUpdateQueued, 0);
++                    Client.SendData(_directReplyUpdate);
++                }
++                return;
++            }
++            catch (Exception e)
++            {
++                var nowTick = Environment.TickCount64;
++                if (nowTick - Interlocked.Read(ref _lastDirectSendWarnTick) >= 5000)
++                {
++                    Interlocked.Exchange(ref _lastDirectSendWarnTick, nowTick);
++                    Logger?.LogWarning("Direct ReplyUpdate send failed, falling back to queue: {e}", e.Message);
++                }
++                Interlocked.Exchange(ref _replyUpdateQueued, 0);
++            }
++        }
++
+         EnqueuePacket(new ReplyUpdatePacket());
+     }
+ 
+@@ -321,6 +368,7 @@ public class ModuleProcessMain
+         if (OperatingSystem.IsWindows())
+         {
+             Core.Utils.TimeBeginPeriod(1);
++            Core.Utils.TryDisablePowerThrottling();
+         }
+         
+         // Start the connection
+@@ -350,7 +398,7 @@ public class ModuleProcessMain
+                 if (pkt == null) continue;  // Ignore your IDE. This can and will be null at some point as we're not locking
+                 if (pkt.GetPacketType() == IpcPacket.PacketType.ReplyUpdate)
+                     Interlocked.Exchange(ref _replyUpdateQueued, 0);
+-                Client.SendData(pkt);
++                SendPacket(pkt);
+                 sentPacket = true;
+             }
+ 
+diff --git a/VRCFaceTracking/Services/ActivationService.cs b/VRCFaceTracking/Services/ActivationService.cs
+index 0471ecb..f7f3ff4 100644
+--- a/VRCFaceTracking/Services/ActivationService.cs
++++ b/VRCFaceTracking/Services/ActivationService.cs
+@@ -25,6 +25,8 @@ public class ActivationService : IActivationService
+     private readonly ILibManager _libManager;
+     private readonly ILogger<ActivationService> _logger;
+     private readonly OpenVRService _openVrService;
++    private readonly ILocalSettingsService _localSettingsService;
++    private static readonly TimeSpan OpenVrInitTimeout = TimeSpan.FromSeconds(5);
+     private UIElement? _shell;
+ 
+     public ActivationService(
+@@ -37,7 +39,8 @@ public class ActivationService : IActivationService
+         ModuleInstaller moduleInstaller, 
+         ILibManager libManager,
+         ILogger<ActivationService> logger,
+-        OpenVRService openVrService)
++        OpenVRService openVrService,
++        ILocalSettingsService localSettingsService)
+     {
+         _defaultHandler = defaultHandler;
+         _activationHandlers = activationHandlers;
+@@ -49,6 +52,55 @@ public class ActivationService : IActivationService
+         _libManager = libManager;
+         _logger = logger;
+         _openVrService = openVrService;
++        _localSettingsService = localSettingsService;
++    }
++
++    // OpenVR is optional (SteamVR auto-start only). It must never block module loading: skip it when disabled or when
++    // SteamVR is not installed, and don't wait more than a few seconds for it (OpenVR.Init can hang without SteamVR).
++    private async Task InitializeOpenVrAsync()
++    {
++        string? disabled = null;
++        try
++        {
++            disabled = await _localSettingsService.ReadSettingAsync<string>("DisableOpenVRStartup", null).ConfigureAwait(false);
++        }
++        catch (Exception e)
++        {
++            _logger.LogDebug(e, "Could not read DisableOpenVRStartup; treating it as unset.");
++        }
++
++        if (bool.TryParse(disabled, out var isDisabled) && isDisabled)
++        {
++            _logger.LogInformation("OpenVR startup disabled by DisableOpenVRStartup. Skipping.");
++            return;
++        }
++
++        try
++        {
++            if (!Valve.VR.OpenVR.IsRuntimeInstalled())
++            {
++                _logger.LogInformation("SteamVR runtime not installed. Skipping OpenVR.");
++                return;
++            }
++        }
++        catch (Exception e)
++        {
++            _logger.LogWarning(e, "Could not check for the SteamVR runtime. Skipping OpenVR.");
++            return;
++        }
++
++        _logger.LogInformation("Initializing OpenVR...");
++        var init = Task.Run(_openVrService.Initialize);
++        if (await Task.WhenAny(init, Task.Delay(OpenVrInitTimeout)).ConfigureAwait(false) != init)
++        {
++            _logger.LogWarning("OpenVR did not initialize within {Timeout}s. Continuing without it.", OpenVrInitTimeout.TotalSeconds);
++            return;
++        }
++
++        if (!await init.ConfigureAwait(false))
++        {
++            _logger.LogWarning("Failed to initialize OpenVR during ActivationService startup. Skipping.");
++        }
+     }
+ 
+     public async Task ActivateAsync(object activationArgs)
+@@ -107,11 +159,7 @@ public class ActivationService : IActivationService
+         _logger.LogInformation("Initializing main service...");
+         await _mainService.InitializeAsync().ConfigureAwait(false);
+         
+-        _logger.LogInformation("Initializing OpenVR...");
+-        if (!_openVrService.Initialize())
+-        {
+-            _logger.LogWarning("Failed to initialize OpenVR during ActivationService startup. Skipping.");
+-        }
++        await InitializeOpenVrAsync().ConfigureAwait(false);
+ 
+         // Before we initialize, we need to delete pending restart modules and check for updates for all our installed modules
+         _logger.LogDebug("Checking for deletion requests for installed modules...");

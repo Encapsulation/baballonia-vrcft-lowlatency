@@ -1,0 +1,26 @@
+diff --git a/src/VRCFaceTracking.Baballonia/BabbleOSC.cs b/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
+index 2245ae9..4429f0f 100644
+--- a/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
++++ b/src/VRCFaceTracking.Baballonia/BabbleOSC.cs
+@@ -14,7 +14,7 @@ public class BabbleOsc
+     public static readonly float[] EyeExpressions = new float[12];
+     private static readonly TimeSpan RebindBackoff = TimeSpan.FromMilliseconds(25);
+     private static readonly TimeSpan StaleDataThreshold = TimeSpan.FromMilliseconds(250);
+-    private static readonly TimeSpan FrameReadyTimeout = TimeSpan.FromMilliseconds(150);
++    private static readonly TimeSpan FrameReadyTimeout = TimeSpan.FromMilliseconds(40);
+     private static readonly TimeSpan BindRetryWindow = TimeSpan.FromSeconds(2);
+ 
+     private Socket? _receiver;
+@@ -244,8 +244,10 @@ public class BabbleOsc
+             {
+                 if (Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastPacketTimestamp)) >= StaleDataThreshold)
+                 {
+-                    var rebindReceiver = Interlocked.Increment(ref _consecutiveStaleTimeouts) >= 2;
+-                    HandleStaleData(rebindReceiver);
++                    // A UDP socket does not go stale: never rebind (and sleep) on silence, only on real faults,
++                    // so the first packets after Baballonia resumes are read immediately.
++                    Interlocked.Increment(ref _consecutiveStaleTimeouts);
++                    HandleStaleData(rebindReceiver: false);
+                 }
+                 continue;
+             }
