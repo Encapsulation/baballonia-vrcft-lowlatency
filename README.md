@@ -1,5 +1,7 @@
 # Baballonia + VRCFaceTracking low-latency fork
 
+[![GitHub stars](https://img.shields.io/github/stars/Encapsulation/baballonia-vrcft-lowlatency?style=flat)](https://github.com/Encapsulation/baballonia-vrcft-lowlatency/stargazers)
+
 Faster eye tracking for VRChat: same Baballonia eye model and camera, much less delay between the camera and VRChat. Tested on a Bigscreen Beyond 2e.
 
 ![Measured results](docs/img/results.png)
